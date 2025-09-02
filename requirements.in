@@ -1,0 +1,40 @@
+# 기본은 PyPI
+--index-url https://pypi.org/simple
+# PyTorch CUDA 12.1 휠 추가 인덱스
+--extra-index-url https://download.pytorch.org/whl/cu121
+
+# ---------- PyTorch (CUDA 12.1 런타임 포함) ----------
+torch==2.4.1
+torchvision==0.19.1
+torchaudio==2.4.1
+# -----------------------------------------------------
+
+# 과학 스택 (핵심: numpy 1.22 계열)
+numpy==1.22.*
+pandas
+scipy
+scikit-learn
+scikit-image
+matplotlib
+opencv-python
+h5py
+
+# rPPG-Toolbox 유틸
+PyYAML
+tensorboardX
+tqdm
+mat73
+timm
+protobuf==3.20.*
+neurokit2
+thop
+fsspec
+ipykernel
+ipywidgets
+yacs
+
+# 확장 모듈
+mamba-ssm==2.2.2
+# causal-conv1d는 PyPI sdist 소스 누락 → GitHub에서 설치
+git+https://github.com/Dao-AILab/causal-conv1d@v1.0.0
+
