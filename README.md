@@ -1,54 +1,5 @@
-<p align="center">
-:fire: Please remember to :star: this repo if you find it useful and cite our work if you end up using it in your work! :fire:
-</p>
-<p align="center">
-:fire: If you have any questions or concerns, please create an <a href="https://github.com/ubicomplab/rPPG-Toolbox/issues">issue</a> :memo:! :fire:
-</p>
-
-
-![rPPG-Toolbox Logo](./figures/toolbox_logo.png)
-
-# :wave: Introduction
-
-**rPPG-Toolbox** is an open-source platform designed for camera-based physiological sensing, also known as remote photoplethysmography (rPPG). 
-
-![Overview of the rPPG](./figures/algorithm.png)
-
-
-rPPG-Toolbox not only benchmarks the **existing state-of-the-art neural and unsupervised methods**, but it also supports flexible and rapid development of your own algorithms.
-![Overview of the toolbox](./figures/toolbox_overview.png)
-
-
-# :notebook: Algorithms
-rPPG-Toolbox currently supports the following algorithms: 
-
-* Traditional Unsupervised Algorithms
-  - [Remote plethysmographic imaging using ambient light (GREEN)](https://pdfs.semanticscholar.org/7cb4/46d61a72f76e774b696515c55c92c7aa32b6.pdf?_gl=1*1q7hzyz*_ga*NTEzMzk5OTY3LjE2ODYxMDg1MjE.*_ga_H7P4ZT52H5*MTY4NjEwODUyMC4xLjAuMTY4NjEwODUyMS41OS4wLjA), by Verkruysse *et al.*, 2008
-  - [Advancements in noncontact multiparameter physiological measurements using a webcam (ICA)](https://affect.media.mit.edu/pdfs/11.Poh-etal-TBME.pdf), by Poh *et al.*, 2011
-  - [Robust pulse rate from chrominance-based rppg (CHROM)](https://ieeexplore.ieee.org/document/6523142), by Haan *et al.*, 2013
-  - [Local group invariance for heart rate estimation from face videos in the wild (LGI)](https://openaccess.thecvf.com/content_cvpr_2018_workshops/papers/w27/Pilz_Local_Group_Invariance_CVPR_2018_paper.pdf), by Pilz *et al.*, 2018
-  - [Improved motion robustness of remote-PPG by using the blood volume pulse signature (PBV)](https://iopscience.iop.org/article/10.1088/0967-3334/35/9/1913), by Haan *et al.*, 2014
-  - [Algorithmic principles of remote ppg (POS)](https://ieeexplore.ieee.org/document/7565547), by Wang *et al.*, 2016
-  - [Face2PPG: An Unsupervised Pipeline for Blood Volume Pulse Extraction From Faces (OMIT)](https://ieeexplore.ieee.org/document/10227326), by Álvarez *et al.*, 2023
-
-
-* Supervised Neural Algorithms 
-  - [DeepPhys: Video-Based Physiological Measurement Using Convolutional Attention Networks (DeepPhys)](https://openaccess.thecvf.com/content_ECCV_2018/papers/Weixuan_Chen_DeepPhys_Video-Based_Physiological_ECCV_2018_paper.pdf), by Chen *et al.*, 2018
-  - [Remote Photoplethysmograph Signal Measurement from Facial Videos Using Spatio-Temporal Networks (PhysNet)](https://bmvc2019.org/wp-content/uploads/papers/0186-paper.pdf), by Yu *et al.*, 2019
-  - [Multi-Task Temporal Shift Attention Networks for On-Device Contactless Vitals Measurement (TS-CAN)](https://papers.nips.cc/paper/2020/file/e1228be46de6a0234ac22ded31417bc7-Paper.pdf), by Liu *et al.*, 2020
-  - [EfficientPhys: Enabling Simple, Fast and Accurate Camera-Based Cardiac Measurement (EfficientPhys)](https://openaccess.thecvf.com/content/WACV2023/papers/Liu_EfficientPhys_Enabling_Simple_Fast_and_Accurate_Camera-Based_Cardiac_Measurement_WACV_2023_paper.pdf), by Liu *et al.*, 2023
-  - [BigSmall: Efficient Multi-Task Learning for Disparate Spatial and Temporal Physiological Measurements
- (BigSmall)](https://arxiv.org/abs/2303.11573), by Narayanswamy *et al.*, 2023
-  - [PhysFormer: Facial Video-based Physiological Measurement with Temporal Difference Transformer (PhysFormer)](https://openaccess.thecvf.com/content/CVPR2022/papers/Yu_PhysFormer_Facial_Video-Based_Physiological_Measurement_With_Temporal_Difference_Transformer_CVPR_2022_paper.pdf), by Yu *et al.*, 2022
-  - [iBVPNet: 3D-CNN architecture introduced in iBVP dataset paper](https://doi.org/10.3390/electronics13071334), by Joshi *et al.*, 2024
-  - [PhysMamba: Efficient Remote Physiological Measurement with SlowFast Temporal Difference Mamba](https://doi.org/10.48550/arXiv.2409.12031), by Luo *et al.*, 2024
-  - [RhythmFormer: Extracting rPPG Signals Based on Hierarchical Temporal Periodic Transformer](https://doi.org/10.48550/arXiv.2402.12788), by Zou *et al.*, 2024
-  - [FactorizePhys: Matrix Factorization for Multidimensional Attention in Remote Physiological Sensing](https://proceedings.neurips.cc/paper_files/paper/2024/hash/af1c61e4dd59596f033d826419870602-Abstract-Conference.html), by Joshi *et al.*, 2024
-
 # :file_folder: Datasets
-The toolbox supports seven datasets, namely SCAMPS, UBFC-rPPG, PURE, BP4D+, UBFC-Phys, MMPD and iBVP. Please cite the corresponding papers when using these datasets. For now, we recommend training with UBFC-rPPG, PURE, iBVP or SCAMPS due to the level of synchronization and volume of the datasets. **To use these datasets in a deep learning model, you should organize the files as follows.**
 * [MMPD](https://github.com/McJackTang/MMPD_rPPG_dataset)
-    * Jiankai Tang, Kequan Chen, Yuntao Wang, Yuanchun Shi, Shwetak Patel, Daniel McDuff, Xin Liu, "MMPD: Multi-Domain Mobile Video Physiology Dataset", IEEE EMBC, 2023
     -----------------
          data/MMPD/
          |   |-- subject1/
@@ -68,7 +19,6 @@ The toolbox supports seven datasets, namely SCAMPS, UBFC-rPPG, PURE, BP4D+, UBFC
     -----------------
     
 * [SCAMPS](https://arxiv.org/abs/2206.04197)
-    * D. McDuff, M. Wander, X. Liu, B. Hill, J. Hernandez, J. Lester, T. Baltrusaitis, "SCAMPS: Synthetics for Camera Measurement of Physiological Signals", NeurIPS, 2022
     -----------------
          data/SCAMPS/Train/
             |-- P00001.mat
@@ -85,7 +35,6 @@ The toolbox supports seven datasets, namely SCAMPS, UBFC-rPPG, PURE, BP4D+, UBFC
     -----------------
 
 * [UBFC-rPPG](https://sites.google.com/view/ybenezeth/ubfcrppg)
-    * S. Bobbia, R. Macwan, Y. Benezeth, A. Mansouri, J. Dubois, "Unsupervised skin tissue segmentation for remote photoplethysmography", Pattern Recognition Letters, 2017.
     -----------------
          data/UBFC-rPPG/
          |   |-- subject1/
@@ -101,8 +50,6 @@ The toolbox supports seven datasets, namely SCAMPS, UBFC-rPPG, PURE, BP4D+, UBFC
     -----------------
    
 * [PURE](https://www.tu-ilmenau.de/universitaet/fakultaeten/fakultaet-informatik-und-automatisierung/profil/institute-und-fachgebiete/institut-fuer-technische-informatik-und-ingenieurinformatik/fachgebiet-neuroinformatik-und-kognitive-robotik/data-sets-code/pulse-rate-detection-dataset-pure)
-    * Stricker, R., Müller, S., Gross, H.-M.Non-contact "Video-based Pulse Rate Measurement on a Mobile Service Robot"
-in: Proc. 23st IEEE Int. Symposium on Robot and Human Interactive Communication (Ro-Man 2014), Edinburgh, Scotland, UK, pp. 1056 - 1062, IEEE 2014
     -----------------
          data/PURE/
          |   |-- 01-01/
@@ -118,7 +65,6 @@ in: Proc. 23st IEEE Int. Symposium on Robot and Human Interactive Communication 
     -----------------
     
 * [BP4D+](https://www.cs.binghamton.edu/~lijun/Research/3DFE/3DFE_Analysis.html)
-    * Zhang, Z., Girard, J., Wu, Y., Zhang, X., Liu, P., Ciftci, U., Canavan, S., Reale, M., Horowitz, A., Yang, H., Cohn, J., Ji, Q., Yin, L. "Multimodal Spontaneous Emotion Corpus for Human Behavior Analysis", IEEE International Conference on Computer Vision and Pattern Recognition (CVPR) 2016.   
     -----------------
         RawData/
          |   |-- 2D+3D/
@@ -166,7 +112,6 @@ in: Proc. 23st IEEE Int. Symposium on Robot and Human Interactive Communication 
     -----------------
 
 * [UBFC-Phys](https://sites.google.com/view/ybenezeth/ubfc-phys)
-    * Sabour, R. M., Benezeth, Y., De Oliveira, P., Chappe, J., & Yang, F. (2021). Ubfc-phys: A multimodal database for psychophysiological studies of social stress. IEEE Transactions on Affective Computing.  
     -----------------
           RawData/
           |   |-- s1/
@@ -191,7 +136,6 @@ in: Proc. 23st IEEE Int. Symposium on Robot and Human Interactive Communication 
     -----------------
 
 * [iBVP](https://github.com/PhysiologicAILab/iBVP-Dataset)
-    * Joshi, J.; Cho, Y. iBVP Dataset: RGB-Thermal rPPG Dataset with High Resolution Signal Quality Labels. Electronics 2024, 13, 1334.
     -----------------
           iBVP_Dataset/
           |   |-- p01_a/
@@ -210,7 +154,6 @@ in: Proc. 23st IEEE Int. Symposium on Robot and Human Interactive Communication 
     -----------------
 
   * [PhysDrive](https://github.com/WJULYW/PhysDrive-Dataset)
-    * Jiyao Wang, Xiao Yang, Qingyong Hu, Jiankai Tang, Can Liu, Dengbo He, Yuntao Wang, Ying-Cong Chen, Kaishun Wu. （2025） PhysDrive: A Multimodal Remote Physiological Measurement Dataset for In-vehicle Driver Monitoring
     -----------------
          On-Road-rPPG/
          |   |-- AFH1/
@@ -231,32 +174,6 @@ in: Proc. 23st IEEE Int. Symposium on Robot and Human Interactive Communication 
          |...
          |   |-- CMZ2/
     -----------------
-
-## :bar_chart: Benchmarks
-
-The table shows  Mean Absolute Error (MAE) and Mean Absolute Percent Error (MAPE) performance across all the algorithms and datasets:
-
-![The overview of the results](./figures/results.png)
-
-# :wrench: Setup
-
-You can use either [`conda`](https://docs.conda.io/projects/conda/en/latest/user-guide/install/index.html) or [`uv`](https://docs.astral.sh/uv/getting-started/installation/) with this toolbox. Most users are already familiar with `conda`, but `uv` may be a bit less familiar - check out some highlights about `uv` [here](https://docs.astral.sh/uv/#highlights). If you use `uv`, it's highly recommended you do so independently of `conda`, meaning you should make sure you're not installing anything in the base `conda` environment or any other `conda` environment. If you're having trouble making sure you're not in your base `conda` environment, try setting `conda config --set auto_activate_base false`.
-
-STEP 1: `bash setup.sh conda` or `bash setup.sh uv` 
-
-STEP 2: `conda activate rppg-toolbox` or, when using `uv`, `source .venv/bin/activate`
-
-NOTE: the above setup should work without any issues on machines using Linux or MacOS. If you run into compiler-related issues using `uv` when installing tools related to mamba, try checking to see if `clang++` is in your path using `which clang++`. If nothing shows up, you can install `clang++` using `sudo apt-get install clang` on Linux or `xcode-select --install` on MacOS.
-
-If you use Windows or other operating systems, consider using [Windows Subsystem for Linux](https://learn.microsoft.com/en-us/windows/wsl/install) and following the steps within `setup.sh` independently.
-
-# :computer: Example of Using Pre-trained Models 
-
-Please use config files under `./configs/infer_configs`
-
-For example, if you want to run The model trained on PURE and tested on UBFC-rPPG, use `python main.py --config_file ./configs/infer_configs/PURE_UBFC-rPPG_TSCAN_BASIC.yaml`
-
-If you want to test unsupervised signal processing  methods, you can use `python main.py --config_file ./configs/infer_configs/UBFC-rPPG_UNSUPERVISED.yaml`
 
 # :computer: Examples of Neural Network Training
 
@@ -355,14 +272,6 @@ Here are some explanation of parameters:
   * `EXCLUSION_LIST`: A list that specifies videos to exclude, typically based on a unique identifier to a video such as the combination of a subject ID and a task ID. This is only used if `USE_EXCLUSION_LIST` is set to `True`. Currently this parameter is only tested with the [UBFC-Phys](https://sites.google.com/view/ybenezeth/ubfc-phys) dataset. Please refer to one of the config files involving the [UBFC-Phys](https://sites.google.com/view/ybenezeth/ubfc-phys) dataset for an example of using this parameter.
   * `TASK_LIST`: A list to specify tasks to include when loading a dataset, allowing for selective inclusion of a subset of tasks or a single task in a dataset if desired. This is only used if `SELECT_TASKS` is set to `True`. Currently this parameter is only tested with the [UBFC-Phys](https://sites.google.com/view/ybenezeth/ubfc-phys) dataset. Please refer to one of the config files involving the [UBFC-Phys](https://sites.google.com/view/ybenezeth/ubfc-phys) dataset for an example of using this parameter.
 
-  
-* #### MODEL : Set used model (Deepphys, TSCAN, Physnet, EfficientPhys, BigSmall, and PhysFormer and their paramaters are supported).
-* #### UNSUPERVISED METHOD: Set used unsupervised method. Example: ["ICA", "POS", "CHROM", "GREEN", "LGI", "PBV"]
-* #### METRICS: Set used metrics. Example: ['MAE','RMSE','MAPE','Pearson','SNR','BA']
-  * 'BA' metric corresponds to the generation of a Bland-Altman plot to graphically compare two measurement techniques (e.g., differences between measured and ground truth heart rates versus mean of measured and ground truth heart rates). This metric saves the plot in the `LOG.PATH` (`runs/exp` by default).
-* #### INFERENCE:
-  * `USE_SMALLER_WINDOW`: If `True`, use an evaluation window smaller than the video length for evaluation.
-
     
 # :open_file_folder: Adding a New Dataset
 
@@ -370,14 +279,14 @@ Here are some explanation of parameters:
 
 * STEP 2: Implement the required functions, including:
 
-  ```python
+  ```
   def preprocess_dataset(self, config_preprocess):
   ```
-  ```python
+  ```
   @staticmethod
   def read_video(video_file):
   ```
-  ```python
+  ```
   @staticmethod
   def read_wave(bvp_file):
   ```
@@ -391,22 +300,22 @@ Here are some explanation of parameters:
 
 * STEP 2: Implement the corresponding training/testing routines in a file `neural_methods/trainer`, e.g. NewModelTrainer.py. Ensure to implement the following functions:
 
-  ```python
+  ```
   def __init__(self, config, data_loader):
   ```
-  ```python
+  ```
   def train(self, data_loader):
   ```
-  ```python
+  ```
   def valid(self, data_loader):
   ```
 
-  ```python
-  def test(self, data_loader)
+  ```
+  def test(self, data_loader):
   ```
 
-  ```python
-  def save_model(index)
+  ```
+  def save_model(index):
   ```
 
 * STEP 3: Add logic to `main.py` to use the models in the following `train_and_test` and `test` functions. 
@@ -477,20 +386,115 @@ Best practice for rPPG model evaluation involves training and validating a model
 If you find our [paper](https://arxiv.org/abs/2210.00716) or this toolbox useful for your research, please cite our work.
 
 ```
-@article{liu2022rppg,
-  title={rPPG-Toolbox: Deep Remote PPG Toolbox},
-  author={Liu, Xin and Narayanswamy, Girish and Paruchuri, Akshay and Zhang, Xiaoyu and Tang, Jiankai and Zhang, Yuzhe and Wang, Yuntao and Sengupta, Soumyadip and Patel, Shwetak and McDuff, Daniel},
-  journal={arXiv preprint arXiv:2210.00716},
-  year={2022}
-}
+    DATA_PATH: "/home/gongjae/PycharmProjects/rPPG-Toolbox/dataset/PURE"    
+    CACHED_PATH: "/home/gongjae/PycharmProjects/rPPG-Toolbox/dataset/PreprocessedData"
+```
+---
+
+```
+sudo apt update
+sudo apt install -y build-essential git ninja-build libgl1 ffmpeg
+sudo apt install -y nvidia-cuda-toolkit
+cd ~/PycharmProjects/rPPG-Toolbox
+python3.10 -m venv .venv
+source .venv/bin/activate
+python -m pip install -U pip setuptools wheel
+
+pip install --index-url https://download.pytorch.org/whl/cu121 \
+  torch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1
 ```
 
-# License
-<a href="https://www.licenses.ai/source-code-license">
-  <img src="https://images.squarespace-cdn.com/content/v1/5c2a6d5c45776e85d1482a7e/1546750722018-T7QVBTM15DQMBJF6A62M/RAIL+Final.png" alt="License: Responsible AI" width="30%">
-</a>
+```
+export TORCH_CUDA_ARCH_LIST="8.6"
 
-# Acknowledgement 
+pip install pip-tools
 
-This research project is supported by a Google PhD Fellowship for Xin Liu and a research grant from Cisco for the University of Washington as well as a career start-up funding grant from the Department of Computer Science at UNC Chapel Hill. This research is also supported by Tsinghua University Initiative Scientific Research Program, Beijing Natural Science Foundation,  and the Natural Science Foundation of China (NSFC). We also would like to acknowledge all the contributors from the open-source community. 
+cat > requirements.in << 'EOF'
+--index-url https://pypi.org/simple
+--extra-index-url https://download.pytorch.org/whl/cu121
 
+# (torch는 위에서 선설치했지만 재현성을 위해 명시)
+torch==2.4.1
+torchvision==0.19.1
+torchaudio==2.4.1
+
+# 과학 스택
+numpy==1.22.*
+pandas
+scipy
+scikit-learn
+scikit-image
+matplotlib
+opencv-python
+h5py
+
+# 툴박스 유틸
+PyYAML
+tensorboardX
+tqdm
+mat73
+timm
+protobuf==3.20.*
+neurokit2
+thop
+fsspec
+ipykernel
+ipywidgets
+yacs
+
+# mamba-ssm는 PyPI로 설치 가능
+mamba-ssm==2.2.2
+
+# causal-conv1d는 PyPI sdist에 소스 누락 → GitHub에서 설치 권장
+# PyPI sdist 누락 → GitHub 소스에서 설치
+causal-conv1d @ git+https://github.com/Dao-AILab/causal-conv1d@v1.0.0
+EOF
+```
+
+```
+# 1) 락파일 생성
+pip-compile --resolver=backtracking --upgrade requirements.in
+
+# 2) 환경 동기화
+pip-sync requirements.txt
+```
+
+```
+# 설치 검증
+python - << 'PY'
+import torch, numpy as np, cv2, h5py, sklearn
+print("torch:", torch.__version__, "| cuda:", torch.cuda.is_available())
+print("numpy:", np.__version__, "| opencv:", cv2.__version__, "| h5py:", h5py.__version__, "| sklearn:", sklearn.__version__)
+try:
+    import mamba_ssm; print("mamba-ssm import OK")
+except Exception as e:
+    print("mamba-ssm WARN:", e)
+try:
+    import causal_conv1d; print("causal-conv1d import OK")
+except Exception as e:
+    print("causal-conv1d WARN:", e)
+print("OK")
+PY
+```
+
+
+```
+cd ~/PycharmProjects/rPPG-Toolbox
+source .venv/bin/activate
+# /main.py @num_workers = 16 -> 0~8 
+# /main.py @BATCH_SIZE = 1
+
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export OPENCV_OPENCL_RUNTIME=
+
+python main.py --config_file ./configs/train_configs/PURE_PURE_UBFC-rPPG_DEEPPHYS_BASIC.yaml
+```
+
+```
+# OOM 강제 종료 시 확인
+sudo journalctl -b -1 -k | tail -n 200
+sudo journalctl -b -1 -k | egrep -i "oom|killed process|nvrm|xid|gpu|thermal"
+```

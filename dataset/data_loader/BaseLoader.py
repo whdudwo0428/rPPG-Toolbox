@@ -8,6 +8,15 @@ Dataset already supported: UBFC-rPPG, PURE, SCAMPS, BP4D+, and UBFC-PHYS.
 import csv
 import glob
 import os
+# Limit library threads (메모리/컨텍스트 폭주 방지)
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+try:
+    cv2.setNumThreads(1)
+except Exception:
+    pass
 import re
 from math import ceil
 from scipy import signal
@@ -216,7 +225,7 @@ class BaseLoader(Dataset):
         """
         data_dirs_split = self.split_raw_data(data_dirs, begin, end)  # partition dataset 
         # send data directories to be processed
-        file_list_dict = self.multi_process_manager(data_dirs_split, config_preprocess) 
+        file_list_dict = self.multi_process_manager(data_dirs_split, config_preprocess, multi_process_quota=0)
         self.build_file_list(file_list_dict)  # build file list
         self.load_preprocessed_data()  # load all data and corresponding labels (sorted for consistency)
         print("Total Number of raw files preprocessed:", len(data_dirs_split), end='\n\n')
@@ -473,7 +482,7 @@ class BaseLoader(Dataset):
             count += 1
         return input_path_name_list, label_path_name_list
 
-    def multi_process_manager(self, data_dirs, config_preprocess, multi_process_quota=8):
+    def multi_process_manager(self, data_dirs, config_preprocess, multi_process_quota=0):
         """Allocate dataset preprocessing across multiple processes.
 
         Args:
@@ -485,39 +494,44 @@ class BaseLoader(Dataset):
         """
         print('Preprocessing dataset...')
         file_num = len(data_dirs)
-        choose_range = range(0, file_num)
+        choose_range = range(file_num)
+
+        # --- Serial path (no extra processes) ---
+        if multi_process_quota <= 0:
+            file_list_dict = {}
+            for i in tqdm(choose_range):
+                # 동일한 인터페이스를 위해 dict를 직접 채움
+                self.preprocess_dataset_subprocess(data_dirs, config_preprocess, i, file_list_dict)
+            return file_list_dict
+
+        # --- Original multiprocessing path ---
         pbar = tqdm(list(choose_range))
-
-        # shared data resource
-        manager = mp.Manager()  # multi-process manager
-        file_list_dict = manager.dict()  # dictionary for all processes to store processed files
-        p_list = []  # list of processes
-        running_num = 0  # number of running processes
-
-        # in range of number of files to process
+        manager = mp.Manager()
+        file_list_dict = manager.dict()
+        p_list = []
+        running_num = 0
         for i in choose_range:
             process_flag = True
-            while process_flag:  # ensure that every i creates a process
-                if running_num < multi_process_quota:  # in case of too many processes
-                    # send data to be preprocessing task
-                    p = mp.Process(target=self.preprocess_dataset_subprocess, 
-                                args=(data_dirs,config_preprocess, i, file_list_dict))
+            while process_flag:
+                if running_num < multi_process_quota:
+                    p = mp.Process(
+                        target=self.preprocess_dataset_subprocess,
+                        args=(data_dirs, config_preprocess, i, file_list_dict)
+                    )
                     p.start()
                     p_list.append(p)
                     running_num += 1
                     process_flag = False
-                for p_ in p_list:
+                for p_ in list(p_list):
                     if not p_.is_alive():
                         p_list.remove(p_)
                         p_.join()
                         running_num -= 1
                         pbar.update(1)
-        # join all processes
         for p_ in p_list:
             p_.join()
             pbar.update(1)
         pbar.close()
-
         return file_list_dict
 
     def build_file_list(self, file_list_dict):
