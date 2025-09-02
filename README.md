@@ -491,6 +491,9 @@ export NUMEXPR_NUM_THREADS=1
 export OPENCV_OPENCL_RUNTIME=
 
 python main.py --config_file ./configs/train_configs/PURE_PURE_UBFC-rPPG_DEEPPHYS_BASIC.yaml
+python main.py --config_file ./configs/train_configs/PURE_PURE_UBFC-rPPG_TSCAN_BASIC.yaml
+python main.py --config_file ./configs/train_configs/PURE_PURE_UBFC-rPPG_MTTSCAN_BASIC.yaml
+
 ```
 
 ```
