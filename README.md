@@ -391,50 +391,123 @@ If you find our [paper](https://arxiv.org/abs/2210.00716) or this toolbox useful
 ```
 ---
 
+### rPPG-Toolbox 환경 세팅 (Ubuntu 24.04 + Python 3.10 + CUDA Toolkit 12.1)
+
+Ubuntu 24.04 / NVIDIA Driver 575.xx 이상 / Python 3.10(pyenv rppg-310) /
+PyTorch 2.4.1 + cu121 + CUDA Toolkit 12.1(nvcc)로 mamba-ssm / causal-conv1d를 호스트에서 직접 빌드/설치
+
+0) 우분투 24.04 + Python 3.10 + NVIDIA 드라이버 575.xx, CUDA Toolkit 미설치) 기준
 ```
 sudo apt update
-sudo apt install -y build-essential git ninja-build libgl1 ffmpeg
-sudo apt install -y nvidia-cuda-toolkit
+sudo apt install -y build-essential git cmake ninja-build pkg-config \
+    libgl1 libglib2.0-0 ffmpeg python3-tk curl gnupg
+nvidia-smi    # 드라이버/런타임 확인 (정보 출력용)
+```
+
+1) 레포 준비 & Python 3.10 환경
+```aiignore
+# pyenv 없으면 설치
+# curl https://pyenv.run | bash
+# echo 'export PATH="$HOME/.pyenv/bin:$PATH"' >> ~/.bashrc
+# echo 'eval "$(pyenv init -)"' >> ~/.bashrc
+# echo 'eval "$(pyenv virtualenv-init -)"' >> ~/.bashrc
+# exec $SHELL -l
+
+# Python 3.10.18 설치
+pyenv install -s 3.10.18
+
+# 가상환경 생성
+pyenv virtualenv -f 3.10.18 rppg-310
+
+# 프로젝트 클론
+# git clone <YOUR_REPO_URL> ~/PycharmProjects/rPPG-Toolbox
 cd ~/PycharmProjects/rPPG-Toolbox
-python3.10 -m venv .venv
-source .venv/bin/activate
-python -m pip install -U pip setuptools wheel
 
-pip install --index-url https://download.pytorch.org/whl/cu121 \
-  torch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1
+# 로컬 고정 (.python-version 생성됨)
+pyenv local rppg-310
+
+# 확인
+python -V && which python
 ```
 
+2) (선택) Matplotlib 저장용 백엔드
+```aiignore
+mkdir -p ~/.config/matplotlib
+printf "backend : Agg\n" > ~/.config/matplotlib/matplotlibrc
 ```
-export TORCH_CUDA_ARCH_LIST="8.6"
 
+3) 초기 스냅샷 & 공통 파이썬 스택
+```aiignore
+mkdir -p .lock
+python -m pip freeze > .lock/pre_install.lock
+
+pip install -U pip setuptools wheel
+pip install numpy scipy pandas matplotlib tqdm yacs scikit-learn \
+            opencv-python-headless wfdb==4.1.2
+```
+
+4) PyTorch 설치 (PyTorch 2.4.1 + cu121)
+```aiignore
+pip install \
+  torch==2.4.1+cu121 \
+  torchvision==0.19.1+cu121 \
+  torchaudio==2.4.1+cu121 \
+  --index-url https://download.pytorch.org/whl/cu121
+```
+
+5) 동결 스냅샷 & 헬스체크
+```aiignore
+python -m pip freeze > .lock/post_install.lock
+
+python - <<'PY'
+import torch, cv2, sys
+print("python:", sys.version.split()[0])
+print("torch:", torch.__version__)
+print("cuda available:", torch.cuda.is_available())
+print("torch.version.cuda:", torch.version.cuda)
+print("cudnn:", torch.backends.cudnn.version())
+print("cv2:", cv2.__version__)
+PY
+```
+
+6) 아키텍처 리스트 (컴파일형 CUDA 익스텐션을 빌드할 때만 설정, 휠만 쓰면 불필요_)
+```aiignore
+# export TORCH_CUDA_ARCH_LIST="8.6" 
+```
+
+7) 사전 tools 설치
+```aiignore
+pip install -U pip setuptools wheel
 pip install pip-tools
+```
 
+8) requirements.in (충돌 최소화 버전) 셋팅
+```aiignore
 cat > requirements.in << 'EOF'
 --index-url https://pypi.org/simple
 --extra-index-url https://download.pytorch.org/whl/cu121
 
-# (torch는 위에서 선설치했지만 재현성을 위해 명시)
+# Core (GPU: cu121)
 torch==2.4.1
 torchvision==0.19.1
 torchaudio==2.4.1
 
-# 과학 스택
-numpy==1.22.*
+# Scientific
+numpy>=2.0,<3
 pandas
 scipy
 scikit-learn
 scikit-image
 matplotlib
-opencv-python
+opencv-python-headless
 h5py
 
-# 툴박스 유틸
+# Utils/Analysis
 PyYAML
 tensorboardX
 tqdm
 mat73
 timm
-protobuf==3.20.*
 neurokit2
 thop
 fsspec
@@ -442,38 +515,90 @@ ipykernel
 ipywidgets
 yacs
 
-# mamba-ssm는 PyPI로 설치 가능
-mamba-ssm==2.2.2
-
-# causal-conv1d는 PyPI sdist에 소스 누락 → GitHub에서 설치 권장
-# PyPI sdist 누락 → GitHub 소스에서 설치
-causal-conv1d @ git+https://github.com/Dao-AILab/causal-conv1d@v1.0.0
 EOF
 ```
 
+9) requirements.txt 생성 (lock)
+```aiignore
+pip-compile --resolver=backtracking --upgrade \
+  --extra-index-url https://download.pytorch.org/whl/cu121 \
+  -o requirements.txt requirements.in
 ```
-# 1) 락파일 생성
-pip-compile --resolver=backtracking --upgrade requirements.in
 
-# 2) 환경 동기화
+10) 환경 동기화 & 설치 검증
+```aiignore  
 pip-sync requirements.txt
+
+python - <<'PY'
+import torch, cv2, numpy as np, h5py, sklearn, skimage, sys
+print("python:", sys.version.split()[0])
+print("torch:", torch.__version__, "| cuda:", torch.cuda.is_available(),
+      "| cuda ver:", torch.version.cuda, "| cudnn:", torch.backends.cudnn.version())
+print("numpy:", np.__version__, "| opencv:", cv2.__version__,
+      "| h5py:", h5py.__version__, "| sklearn:", sklearn.__version__,
+      "| skimage:", skimage.__version__)
+print("OK")
+PY
 ```
 
+### CUDA Toolkit 12.1 설치(호스트) & CUDA 확장 빌드
+
+11) NVIDIA 공식 리포로 CUDA Toolkit 12.1 설치
+```aiignore
+cd /tmp
+wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+sudo dpkg -i cuda-keyring_1.1-1_all.deb
+sudo apt update
+
+# 설치 가능한 12.x 확인
+apt-cache search cuda-toolkit-12 | sort
+# ↑ 여기서 보이는 버전(예: cuda-toolkit-12-6 또는 12-8 등)으로 설치
+
+# CUDA Toolkit 12.6 설치
+sudo apt install -y cuda-toolkit-12-6
+
+# 환경 변수 등록
+echo 'export CUDA_HOME=/usr/local/cuda-12.6' >> ~/.bashrc
+echo 'export PATH=$CUDA_HOME/bin:$PATH'     >> ~/.bashrc
+source ~/.bashrc
+
+# 확인
+nvcc --version
+ls -ld $CUDA_HOME
 ```
-# 설치 검증
-python - << 'PY'
-import torch, numpy as np, cv2, h5py, sklearn
-print("torch:", torch.__version__, "| cuda:", torch.cuda.is_available())
-print("numpy:", np.__version__, "| opencv:", cv2.__version__, "| h5py:", h5py.__version__, "| sklearn:", sklearn.__version__)
-try:
-    import mamba_ssm; print("mamba-ssm import OK")
-except Exception as e:
-    print("mamba-ssm WARN:", e)
-try:
-    import causal_conv1d; print("causal-conv1d import OK")
-except Exception as e:
-    print("causal-conv1d WARN:", e)
-print("OK")
+
+12) (선택) 아키텍처 지정
+```
+cd ~/PycharmProjects/rPPG-Toolbox
+
+# Ampere(30xx) → 8.6, Ada(40xx) → 8.9 권장
+export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.6}"
+```
+
+13) CUDA 확장 설치 (호스트에서 직접 빌드)
+```aiignore
+# rppg-310 활성 상태/프로젝트 폴더에서 실행 권장
+cd ~/PycharmProjects/rPPG-Toolbox
+
+# 컴파일 도구 최신화
+python -m pip install -U pip setuptools wheel
+
+# mamba-ssm (빌드 필요 가능)
+pip install mamba-ssm==2.2.2
+
+# causal-conv1d (공식 PyPI sdist 이슈 → GitHub 소스 빌드 권장)
+pip install git+https://github.com/Dao-AILab/causal-conv1d@v1.0.0
+```
+
+14) 최종 검증
+```aiignore
+python - <<'PY'
+import torch, mamba_ssm, causal_conv1d, sys
+print("exe:", sys.executable)
+print("torch:", torch.__version__, "| cuda:", torch.cuda.is_available(),
+      "| cuda ver:", torch.version.cuda, "| cudnn:", torch.backends.cudnn.version())
+print("mamba-ssm OK:", getattr(mamba_ssm, "__version__", "unknown"))
+print("causal-conv1d OK:", getattr(causal_conv1d, "__version__", "unknown"))
 PY
 ```
 
