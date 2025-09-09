@@ -568,7 +568,7 @@ ls -ld $CUDA_HOME
 ```
 
 12) (선택) 아키텍처 지정
-```
+```aiignore
 cd ~/PycharmProjects/rPPG-Toolbox
 
 # Ampere(30xx) → 8.6, Ada(40xx) → 8.9 권장
@@ -602,23 +602,16 @@ print("causal-conv1d OK:", getattr(causal_conv1d, "__version__", "unknown"))
 PY
 ```
 
+---
 
 ```
 cd ~/PycharmProjects/rPPG-Toolbox
-source .venv/bin/activate
 # /main.py @num_workers = 16 -> 0~8 
 # /main.py @BATCH_SIZE = 1
-
-export OMP_NUM_THREADS=1
-export MKL_NUM_THREADS=1
-export OPENBLAS_NUM_THREADS=1
-export NUMEXPR_NUM_THREADS=1
-export OPENCV_OPENCL_RUNTIME=
 
 python main.py --config_file ./configs/train_configs/PURE_PURE_UBFC-rPPG_DEEPPHYS_BASIC.yaml
 python main.py --config_file ./configs/train_configs/PURE_PURE_UBFC-rPPG_TSCAN_BASIC.yaml
 python main.py --config_file ./configs/train_configs/PURE_PURE_UBFC-rPPG_MTTSCAN_BASIC.yaml
-
 ```
 
 ```
