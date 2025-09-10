@@ -1,461 +1,783 @@
-# COHFACE: GT time viewer + 7-point motion segments (correlation to respiration GT)
-# - 위(좌): 비디오 + 7포인트 + 상관 Top-3 선분(빨/노/파)
-# - 우(상): Top-3 ΔL(t) 미니 그래프
-# - 아래: pulse(t), respiration(t), HR_gt(t), RR_gt(t)  (모두 tt 축)
-# 단축키:
-#   [ ] / { }  → offset ±0.1s / ±1.0s       (영상↔GT 정합)
-#   1/2/4/8     → HR/RR 창(12/2/4/8s)        (사전계산 재수행)
-#   g           → 그래프 스팬 30/60/120s
-#   a           → y-스케일 자동/고정 토글
-#   m           → 모션 추적 ON/OFF
-#   v           → ΔL 정의: 세로만 ↔ L2거리
-#   r           → 7포인트 재배치(가슴 자동 초기화)
-#   c           → ROI를 마우스로 드래그해서 지정(그 ROI 내부에서 7포인트 자동선정)
-#   ESC         → 종료
+# -*- coding: utf-8 -*-
+"""
+COHFACE (v2.7a, GT-aligned minimal HUD)
+- 왼쪽: 비디오 + 랜드마크 + 타이머
+- 오른쪽: 2x2 패널 (dY, dD, dW, dC vs GT)
+"""
 
-import cv2, h5py, numpy as np
-from scipy.signal import butter, filtfilt, welch, find_peaks
+import os
+
+os.environ["QT_QPA_PLATFORM"] = "xcb"
+os.environ["OPENCV_VIDEOIO_PRIORITY_MSMF"] = "0"
+
+import cv2, h5py, numpy as np, mediapipe as mp
 from collections import deque
+from scipy.signal import welch, coherence
 
-# ========= 경로 =========
+# ---------------- Paths ----------------
 VIDEO = "/mnt/hdd18t/rppg_dataset/raw/cohface/1/0/data.mkv"
-H5    = "/mnt/hdd18t/rppg_dataset/raw/cohface/1/0/data.hdf5"
+H5 = "/mnt/hdd18t/rppg_dataset/raw/cohface/1/0/data.hdf5"
+SHOW_GT = os.path.exists(H5)
 
-# ========= 파라미터 =========
-NUM_PTS      = 7
-HR_BAND      = (0.70, 3.00)     # Hz (42–180 bpm)
-RR_BAND      = (0.10, 0.50)     # Hz (6–30 brpm)
-WIN_SEC      = 8                # HR/RR/RR_mtn 계산 창
-SPAN_CHOICES = [30, 60, 120]    # 그래프 스팬
-SPAN_SEC     = 60
-CORR_WIN     = 20               # 상관 계산 창(초)
-BG           = (16,16,16)
+# ---------------- View/Run Params ----------------
+VIEW_W, VIEW_H = 1920, 900
+LEFT_RATIO = 0.40
+SPAN_SEC = 60.0
+HIS_SEC = 180.0
+PROC_W = 640
+POSE_EVERY_N = 2
+BG = (16, 16, 16)
+HUD_COL = (200, 230, 230)
+COLORS = {  # BGR (OpenCV)
+    "dY": (230, 230, 230),  # 흰색
+    "dD": (120, 220, 120),  # 연녹
+    "dW": (120, 200, 255),  # 청록
+    "dC": (220, 220, 80),  # 연노랑
+}
 
-# ========= 유틸 =========
-def put(img, txt, xy, s=0.78, col=(230,230,230), th=1):
-    cv2.putText(img, txt, xy, cv2.FONT_HERSHEY_SIMPLEX, s, col, th, cv2.LINE_AA)
+# (검출/스무딩)
+EMA_BETA_LMK = 0.7
+MAX_LMK_JUMP = 40.0
 
-def bandpass(x, fs, lo, hi, order=3):
-    ny = fs*0.5
-    b,a = butter(order, [lo/ny, hi/ny], btype="band")
-    return filtfilt(b,a,x,method="gust")
+# (호흡 대역/필터 & 스펙트럼)
+RESP_BAND = (0.08, 0.60)  # 5–36 bpm
+RESP_ORDER = 4
+RR_BAND = (0.08, 0.60)
+MIN_BAND_BINS = 3
+SPEC_WIN = 12.0
+SNR_EXCLUDE_K = 1
+SNR_FLOOR_MIN = 1e-6
 
-def hr_from_win(x, fs):
-    if len(x) < int(1.5*fs): return np.nan
-    y = (x - x.mean())/(x.std()+1e-8)
-    try: y = bandpass(y, fs, HR_BAND[0], HR_BAND[1], 3)
-    except: pass
-    pk,_ = find_peaks(y, distance=int(fs*0.33), prominence=np.std(y)*0.3)
-    if pk.size < 2: return np.nan
-    ibi = np.diff(pk)/fs
-    return float(np.median(60.0/np.clip(ibi,1e-3,None)))
+# (Z-정규화)
+VIZ_MODE = "zfix"  # zfix | zwin | raw
+ZFIX_WARMUP_SEC = 25.0
+Z_CLIP = 3.0
 
-def rr_from_win(x, fs):
-    if len(x) < int(1.5*fs): return np.nan
-    nper = min(len(x), int(8*fs))
-    f,P = welch(x - np.mean(x), fs=fs, nperseg=nper, noverlap=nper//2)
-    m = (f>=RR_BAND[0])&(f<=RR_BAND[1])
-    if not np.any(m): return np.nan
-    fr,Pr = f[m], P[m]
-    return 60.0*float(fr[np.argmax(Pr)])
+# (학습형 결합특징)
+RIDGE_ALPHA = 1e-3
+W_EMA_BETA = 0.8
+GATE_COH = 0.50
+GATE_CORR = 0.20
 
-def draw_axis(panel, ymin, ymax, title):
-    h,w = panel.shape[:2]
-    cv2.rectangle(panel,(0,0),(w-1,h-1),(40,40,40),1)
-    put(panel, f"{ymin:.0f}", (6,h-8), 0.6, (180,180,180))
-    put(panel, f"{ymax:.0f}", (6,18),   0.6, (180,180,180))
-    put(panel, title, (8, 20), 0.6, (200,200,200))
+# (전역 지연)
+GLOBAL_LAG_SEC = None
+GLOBAL_LAG_READY_T = 25.0
+GLOBAL_LAG_TEXT = ""
 
-def plot_series_scaled(panel, t, y, t0, span, ymin, ymax, color=(220,220,220), margin=8):
-    h,w = panel.shape[:2]
-    t1 = t0 + span
-    m = (t>=t0)&(t<=t1)&np.isfinite(y)
-    if not np.any(m): return
-    T = (t[m]-t0)/max(1e-9, span)
-    Y = (y[m]-ymin)/max(1e-6,(ymax-ymin))
-    xs = (margin + (w-2*margin)*T).astype(int)
-    ys = (h-1 - margin - (h-2*margin)*np.clip(Y,0,1)).astype(int)
-    pts = np.stack([xs,ys],1)
-    if len(pts)>=2: cv2.polylines(panel,[pts],False,color,2,cv2.LINE_AA)
+# (표시)
+MA_WIN = 7
+TIMER_POS = (40, VIEW_H - 30)
 
-# ========= GT 로드 =========
-with h5py.File(H5,"r") as f:
-    pulse = np.asarray(f["pulse"][:], np.float32)
-    resp  = np.asarray(f["respiration"][:], np.float32)
-    tt    = np.asarray(f["time"][:], np.float32)
+# ---------------- State ----------------
+ts = deque();
+dY = deque();
+dD = deque();
+dW = deque();
+dC = deque();
+dC_opt = deque()
+y0 = d0 = w0 = None
+L_EMA = R_EMA = N_EMA = None
+prev_L = prev_R = prev_N = None
+WC = None
+ZFIX = {"dY": None, "dD": None, "dW": None, "dC": None, "GT": None}
 
-fs = float(1.0/np.median(np.diff(tt)))
-T_START, T_END = float(tt[0]), float(tt[-1])
+# ---- Polarity fix (워밍업 1회) ----
+POL_SIGN = {"dY": None, "dD": None, "dW": None}
+POL_READY_SEC = 10.0  # 워밍업 길이(초)
+POL_APPLIED = False
 
-# 파형(표시용)
-pulse_vis = (pulse - np.mean(pulse))/max(1e-8,np.std(pulse))
-try: pulse_vis = bandpass(pulse_vis, fs, HR_BAND[0], HR_BAND[1], 3)
-except: pass
-resp_std = (resp - np.mean(resp))/max(1e-8,np.std(resp))
-resp_rr  = bandpass(resp_std, fs, RR_BAND[0], RR_BAND[1], 3)  # 상관용
 
-# ========= HR/RR 사전계산 (tt 축) =========
-def sliding_map(sig, tt, fs, win_sec, func):
-    n=len(tt); out=np.full(n,np.nan,np.float32)
-    if int(win_sec*fs)<8: return out
-    j0=0
-    for i in range(n):
-        t_ref=tt[i]; t_start=t_ref-win_sec
-        while j0<i and tt[j0]<t_start: j0+=1
-        out[i]=func(sig[j0:i+1], fs)
-    return out
+def try_update_polarity_once():
+    # 워밍업 구간(마지막 10s)에서 dY/dD/dW의 부호를 GT에 맞춰 한 번만 고정
+    if not SHOW_GT or POL_SIGN["dY"] is not None:
+        return
+    if len(ts) < 8:
+        return
 
-print("Precomputing HR/RR on tt...")
-HR_t = sliding_map(pulse, tt, fs, WIN_SEC, hr_from_win)
-RR_t = sliding_map(resp,  tt, fs, WIN_SEC, rr_from_win)
-print("Done.")
+    t_np = np.asarray(ts, np.float32)
+    t1 = t_np[-1];
+    t0 = t1 - POL_READY_SEC
+    if t_np[0] > t0:
+        return
 
-# ========= 비디오/모션 =========
-cap = cv2.VideoCapture(VIDEO); assert cap.isOpened(), "영상 열기 실패"
-win = "COHFACE: GT + motion-correlation"
-cv2.namedWindow(win, cv2.WINDOW_NORMAL); cv2.resizeWindow(win, 1500, 980)
+    m = (t_np >= t0)
+    tw = t_np[m]
+    Y = np.asarray(dY, np.float32)[m]
+    D = np.asarray(dD, np.float32)[m]
+    Wv = np.asarray(dW, np.float32)[m]
 
-lk_params      = dict(winSize=(21,21), maxLevel=3,
-                      criteria=(cv2.TERM_CRITERIA_EPS|cv2.TERM_CRITERIA_COUNT,30,0.01))
-feature_params = dict(maxCorners=NUM_PTS, qualityLevel=0.01, minDistance=18, blockSize=7)
+    tu, yU, fs = resample_uniform(tw, Y)
+    if tu is None:
+        return
+    _, dU, _ = resample_uniform(tw, D, fs)
+    _, wU, _ = resample_uniform(tw, Wv, fs)
 
-enable_motion     = True
-use_vertical_only = True
-t_offset          = 0.0
-span_idx          = SPAN_CHOICES.index(SPAN_SEC) if SPAN_SEC in SPAN_CHOICES else 1
-auto_scale        = True
+    tg = gt_t if GLOBAL_LAG_SEC is None else (gt_t + GLOBAL_LAG_SEC)
+    mg = (tg >= tw[0]) & (tg <= tw[-1])
+    if not np.any(mg):
+        return
+    gU = np.interp(tu, tg[mg], gt_resp[mg]).astype(np.float32)
 
-prev_gray = None
-pts_prev  = None        # (N,1,2)
-pts_init  = None
-need_reinit = True
+    def prep(z):
+        return zscore(bandpass(z, fs, RESP_BAND, RESP_ORDER))
 
-# ROI 선택(마우스)
-roi_manual = None
-_ixy, _selecting = (0,0), False
-def on_mouse(event,x,y,flags,param):
-    global roi_manual, _ixy, _selecting
-    if event==cv2.EVENT_LBUTTONDOWN:
-        _ixy=(x,y); _selecting=True
-    elif event==cv2.EVENT_MOUSEMOVE and _selecting:
-        x0,y0=_ixy; x1,y1=x,y
-        roi_manual=(min(x0,x1),min(y0,y1), abs(x1-x0),abs(y1-y0))
-    elif event==cv2.EVENT_LBUTTONUP:
-        _selecting=False
-cv2.setMouseCallback(win, on_mouse)
+    yU, dU, wU, gU = map(prep, [yU, dU, wU, gU])
 
-# 포인트/쌍 타임시리즈
-times_vid = deque()                    # 비디오 시간축 (t_ref)
-pairs     = None                       # [(i,j), ...]
-pair_init_len = None                   # 초기 길이
-pair_series = {}                       # (i,j) -> deque of ΔL
-pair_colors = [(60,180,240),(60,220,120),(240,220,60)]  # 파/초/노 (우측 패널은 흰색들)
+    def sgn(a, b):
+        r = np.corrcoef(a, b)[0, 1]
+        return +1.0 if r >= 0 else -1.0
 
-def auto_points(frame):
-    """가슴/어깨 범위에서 NUM_PTS점 자동 선정"""
-    H,W = frame.shape[:2]
-    if roi_manual is None or roi_manual[2]<10 or roi_manual[3]<10:
-        x1,x2=int(W*0.25),int(W*0.75)
-        y1,y2=int(H*0.55),int(H*0.88)
-    else:
-        x1,y1,w,h=roi_manual; x2,y2=x1+w,y1+h
-    roi = frame[y1:y2, x1:x2]
-    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-    pts = cv2.goodFeaturesToTrack(gray, mask=None, **feature_params)
-    if pts is None or len(pts)<NUM_PTS:
-        xs = np.linspace(x1+20, x2-20, NUM_PTS).astype(int)
-        y  = int((y1+y2)/2)
-        base = np.array([[[x,y]] for x in xs], np.float32)
-    else:
-        pts = pts[:NUM_PTS].reshape(-1,2); pts[:,0]+=x1; pts[:,1]+=y1
-        base = pts.reshape(-1,1,2).astype(np.float32)
-    return base
+    POL_SIGN["dY"] = sgn(yU, gU)
+    POL_SIGN["dD"] = sgn(dU, gU)
+    POL_SIGN["dW"] = sgn(wU, gU)
 
-def build_pairs(n):
-    out=[]
-    for i in range(n):
-        for j in range(i+1,n):
-            out.append((i,j))
-    return out
+    # --- 확정 순간, 과거 버퍼도 재부호 (deque는 슬라이스 X) ---
+    global POL_APPLIED
+    if not POL_APPLIED and POL_SIGN["dY"] is not None:
+        def re_sign(dq, s):
+            tmp = [v * s for v in dq]  # 리스트로 새로 만든 뒤
+            dq.clear()
+            dq.extend(tmp)  # 덮어쓰기
 
-def ensure_pair_series():
-    global pairs, pair_init_len, pair_series
-    n = len(pts_init.reshape(-1,2))
-    pairs = build_pairs(n)
-    pair_init_len = {}
-    pair_series = {}
-    P = pts_init.reshape(-1,2)
-    for (i,j) in pairs:
-        L0 = float(np.linalg.norm(P[i]-P[j]))
-        pair_init_len[(i,j)] = max(1e-6, L0)
-        pair_series[(i,j)] = deque()
+        re_sign(dY, POL_SIGN["dY"])
+        re_sign(dD, POL_SIGN["dD"])
+        re_sign(dW, POL_SIGN["dW"])
+        POL_APPLIED = True
 
-def update_motion_series(P):
-    """현재 포인트 P(N,2)로 각 쌍 ΔL을 업데이트; 추적 실패는 np.nan 기록"""
-    for (i,j) in pairs:
-        if i>=len(P) or j>=len(P):
-            pair_series[(i,j)].append(np.nan);
-            continue
-        L = float(np.linalg.norm(P[i]-P[j]))
-        dL = L - pair_init_len[(i,j)]
-        pair_series[(i,j)].append(dL)
 
-def trim_series(max_age):
-    """times_vid 및 각 pair deque를 오래된 것 제거"""
-    while len(times_vid) and (times_vid[-1]-times_vid[0] > max_age):
-        times_vid.popleft()
-        for k in pair_series.keys():
-            pair_series[k].popleft()
+# ---------------- Utils ----------------
+def put(img, txt, xy, s=0.72, col=(230, 230, 230)):
+    x, y = xy;
+    cv2.putText(img, txt, (int(x), int(y)), cv2.FONT_HERSHEY_SIMPLEX, s, col, 1, cv2.LINE_AA)
 
-def corr_against_resp(pair_key, t_end, win_sec):
-    """최근 win_sec 창에서 ΔL vs respiration(RR대역) 상관 (피어슨).
-       times_vid 길이와 pair_series 길이가 달라도 안전하게 정렬."""
-    if pair_key not in pair_series:
-        return np.nan
 
-    tv = np.asarray(list(times_vid), np.float32)
-    yv = np.asarray(list(pair_series[pair_key]), np.float32)
-    if tv.size == 0 or yv.size == 0:
-        return np.nan
+def soft_clip_z(z, clip=3.0):
+    # tanh로 부드럽게 클립 (형상 보존)
+    z = np.asarray(z, np.float32)
+    return clip * np.tanh(z / (clip / 1.5))
 
-    # 길이 맞추기(뒤에서 정렬)
-    L = min(len(tv), len(yv))
-    tv = tv[-L:]
-    yv = yv[-L:]
 
-    t0 = t_end - win_sec
-    m = (tv >= t0) & np.isfinite(yv)
-    if np.count_nonzero(m) < 8:
-        return np.nan
+def gcc_phat_linear(x, y, fs):
+    # 선형 상관 기반 GCC-PHAT (제로패딩 n = len(x)+len(y)-1)
+    x = np.asarray(x, np.float32).ravel()
+    y = np.asarray(y, np.float32).ravel()
+    n = int(len(x) + len(y) - 1)
+    nfft = 1
+    while nfft < n:
+        nfft <<= 1
+    X = np.fft.rfft(x, nfft)
+    Y = np.fft.rfft(y, nfft)
+    R = X * np.conj(Y)
+    R /= (np.abs(R) + 1e-12)
+    cc = np.fft.irfft(R, nfft)
+    # 선형 상관의 유효 구간 추출
+    lag_samp = np.arange(-len(y) + 1, len(x))
+    cc = np.concatenate([cc[-(len(y) - 1):], cc[:len(x)]])
+    i = int(np.argmax(cc))
+    return float(lag_samp[i] / fs)
 
-    tv = tv[m]
-    yv = yv[m]
 
-    # ΔL 전처리 → RR대역 밴드패스
-    dt = np.median(np.diff(tv)) if tv.size > 1 else 0.0
-    if dt <= 0:
-        return np.nan
-    fs_m = 1.0 / dt
+def delta_lag_window(global_lag, window_lag, clip=0.5):
+    if global_lag is None or not np.isfinite(global_lag):
+        return float(np.clip(window_lag, -clip, clip))
+    return float(np.clip(window_lag - global_lag, -clip, clip))
 
-    yv = yv - np.median(yv)
+
+def moving_average(x, k):
+    if k <= 1 or len(x) < k: return x
+    if k % 2 == 0: k += 1
+    pad = k // 2
+    xx = np.pad(np.asarray(x, np.float32), (pad, pad), mode="edge")
+    w = np.ones(k) / k
+    return np.convolve(xx, w, mode="valid")
+
+
+def resample_uniform(t, x, fs=None):
+    t = np.asarray(t, np.float32);
+    x = np.asarray(x, np.float32)
+    if len(t) < 3: return None, None, None
+    dt = np.median(np.diff(t))
+    if not np.isfinite(dt) or dt <= 1e-6: return None, None, None
+    if fs is None: fs = 1.0 / dt
+    t_u = np.arange(t[0], t[-1] + 1e-6, 1.0 / fs, dtype=np.float32)
+    x_u = np.interp(t_u, t, x).astype(np.float32)
+    return t_u, x_u, fs
+
+
+def butter_sos(lo, hi, fs, order=4):
+    nyq = fs * 0.5
+    lo2 = max(1e-3, lo / nyq);
+    hi2 = min(0.999, hi / nyq)
+    if hi2 <= lo2 + 1e-3: return None
+    from scipy.signal import butter
+    return butter(order, [lo2, hi2], btype='bandpass', output='sos')
+
+
+def bandpass(x, fs, band=RESP_BAND, order=RESP_ORDER):
+    if x is None or fs is None: return x
+    x = np.asarray(x, np.float32).ravel()
+    sos = butter_sos(band[0], band[1], fs, order)
+    if sos is None: return x
+    from scipy.signal import sosfiltfilt
+    padlen = 3 * sos.shape[0]
+    if x.size <= padlen: return x
     try:
-        yvf = bandpass(yv, fs_m, RR_BAND[0], RR_BAND[1], 3)
+        return sosfiltfilt(sos, x).astype(np.float32)
+    except ValueError:
+        return x
+
+
+def zscore(x):
+    x = np.asarray(x, np.float32)
+    mu = float(np.mean(x));
+    sd = float(np.std(x))
+    if not np.isfinite(sd) or sd < 1e-6: sd = 1.0
+    return (x - mu) / sd
+
+
+def seg_params(L, fs):
+    target = int(fs * SPEC_WIN)
+    nper = max(16, min(target, max(16, L // 2)))
+    nover = min(nper - 1, nper // 2)
+    return nper, nover
+
+
+def safe_fmt(v, fmt="{:.2f}"):
+    return fmt.format(v) if v is not None and np.isfinite(v) else "--"
+
+
+def r_to_p(r, n):
+    if not np.isfinite(r) or n is None or n < 4: return None
+    den = max(1e-9, 1.0 - r * r)
+    t = r * np.sqrt(max(1.0, (n - 2)) / den)
+    from math import erf, sqrt
+    Phi = 0.5 * (1.0 + erf(abs(t) / sqrt(2.0)))
+    p = 2.0 * (1.0 - Phi)
+    return float(max(1e-9, min(1.0, p)))
+
+
+def gcc_phat(x, y, fs):
+    n = 1
+    L = len(x) + len(y)
+    while n < L: n <<= 1
+    X = np.fft.rfft(x, n);
+    Y = np.fft.rfft(y, n)
+    R = X * np.conj(Y);
+    R /= np.abs(R) + 1e-12
+    cc = np.fft.irfft(R, n)
+    cc = np.concatenate((cc[-(len(x) - 1):], cc[:len(y)]))
+    lags = np.arange(-len(x) + 1, len(y))
+    i = int(np.argmax(cc))
+    return float(lags[i] / fs)
+
+
+# ---------------- GT ----------------
+gt_t, gt_resp = None, None
+if SHOW_GT:
+    try:
+        with h5py.File(H5, "r") as f:
+            gt_resp = np.asarray(f["respiration"][:], np.float32)
+            gt_t = np.asarray(f["time"][:], np.float32)
+    except Exception as e:
+        print("[GT disabled]", e);
+        SHOW_GT = False
+
+
+def estimate_rr_from_gt(t0, t1):
+    if not SHOW_GT or gt_t is None: return np.nan
+    m = (gt_t >= t0) & (gt_t <= t1)
+    if np.count_nonzero(m) < 8: return np.nan
+    tu, gu, fs = resample_uniform(gt_t[m], gt_resp[m])
+    if tu is None: return np.nan
+    gu = bandpass(zscore(gu), fs, RR_BAND, RESP_ORDER)
+    L = len(gu);
+    nper, nover = seg_params(L, fs)
+    if nper == 0 or L < nper: return np.nan
+    f, P = welch(gu, fs=fs, nperseg=nper, noverlap=nover)
+    mb = (f >= RR_BAND[0]) & (f <= RR_BAND[1])
+    if np.count_nonzero(mb) < MIN_BAND_BINS: return np.nan
+    fb = f[mb];
+    Pb = P[mb]
+    f0 = float(fb[np.argmax(Pb)])
+    return f0 * 60.0
+
+
+# ---------------- Alignment helpers ----------------
+GLOBAL_LAG_SEC = None
+GLOBAL_LAG_TEXT = ""
+
+
+def learn_global_lag_once():
+    global GLOBAL_LAG_SEC, GLOBAL_LAG_TEXT
+    if GLOBAL_LAG_SEC is not None: return
+    if len(ts) < 16 or not SHOW_GT: return
+    t_np = np.asarray(ts, np.float32)
+    t1 = t_np[-1]
+    if t1 < GLOBAL_LAG_READY_T: return
+    t0 = max(t_np[0], t1 - GLOBAL_LAG_READY_T)
+    m = (t_np >= t0)
+    if np.count_nonzero(m) < 64: return
+    tw = t_np[m];
+    sw = np.asarray(dC, np.float32)[m]
+    mgt = (gt_t >= t0) & (gt_t <= t1)
+    if not np.any(mgt): return
+    tu, su, fs = resample_uniform(tw, sw)
+    _, gu, _ = resample_uniform(gt_t[mgt], gt_resp[mgt], fs)
+    if tu is None or su is None or gu is None: return
+    su = bandpass(zscore(su), fs, RESP_BAND, RESP_ORDER)
+    gu = bandpass(zscore(gu), fs, RESP_BAND, RESP_ORDER)
+    try:
+        lag = gcc_phat_linear(su, gu, fs)
+        GLOBAL_LAG_SEC = float(lag)
+        GLOBAL_LAG_TEXT = f"GLOBAL LAG {lag:+.02f}s (GCC-PHAT@{int(GLOBAL_LAG_READY_T)}s)"
     except Exception:
-        yvf = yv
-
-    # Resp 파형(RR대역)을 동일 시간축으로 보간
-    resp_seg = np.interp(tv, tt, resp_rr)
-
-    if np.std(yvf) < 1e-6 or np.std(resp_seg) < 1e-6:
-        return np.nan
-
-    return float(np.corrcoef(yvf, resp_seg)[0, 1])
+        GLOBAL_LAG_SEC = 0.0
+        GLOBAL_LAG_TEXT = "GLOBAL LAG +0.00s (fallback)"
 
 
-# ========= 루프 =========
+# ---------------- Metrics ----------------
+def band_metrics(tw, sw):
+    if not SHOW_GT or tw is None or len(tw) < 8:
+        return {}
+    t1 = tw[-1];
+    t0 = max(tw[0], t1 - SPEC_WIN)
+    m = (tw >= t0)
+    if np.count_nonzero(m) < 8:
+        return {}
+    tw = tw[m].astype(np.float32);
+    sw = np.asarray(sw, np.float32)[m]
+
+    tg = gt_t if GLOBAL_LAG_SEC is None else (gt_t + GLOBAL_LAG_SEC)
+    mg = (tg >= t0) & (tg <= t1)
+    if not np.any(mg):
+        return {}
+
+    tu, su, fs = resample_uniform(tw, sw)
+    gg = np.interp(tu, tg[mg], gt_resp[mg]).astype(np.float32)
+
+    su = zscore(bandpass(su, fs, RESP_BAND, RESP_ORDER))
+    gu = zscore(bandpass(gg, fs, RESP_BAND, RESP_ORDER))
+    L = len(su)
+    if L < 16:
+        return {}
+
+    corr = float(np.corrcoef(su, gu)[0, 1])
+    try:
+        lag_lin = gcc_phat_linear(su, gu, fs)
+    except Exception:
+        lag_lin = 0.0
+    dlag = delta_lag_window(GLOBAL_LAG_SEC, lag_lin, clip=0.5)
+
+    # Welch
+    nper = max(16, int(fs * 8.0))
+    nover = nper // 2
+    if L < nper:
+        coh_val = np.nan
+    else:
+        f, Cxy = coherence(su, gu, fs=fs, nperseg=nper, noverlap=nover)
+        # NaN/Inf 방지 가드
+        if not np.all(np.isfinite(Cxy)):
+            Cxy = np.nan_to_num(Cxy, nan=0.0, posinf=0.0, neginf=0.0)
+        mb = (f >= RR_BAND[0]) & (f <= RR_BAND[1])
+        coh_val = float(np.nanmean(Cxy[mb])) if np.any(mb) else np.nan
+
+    rr_bpm = estimate_rr_from_gt(t0, t1)
+    pval = r_to_p(corr, L)
+
+    return dict(corr=corr, dlag=dlag, coh=coh_val, rr_bpm=rr_bpm, n=L, p=pval)
+
+
+# ---------------- ZFIX 기준 산출 ----------------
+def try_update_zfix():
+    if ZFIX["dY"] is not None: return
+    if len(ts) < 3: return
+    t_np = np.asarray(ts, np.float32)
+    t1 = t_np[-1];
+    t0 = t1 - ZFIX_WARMUP_SEC
+    if t_np[0] > t0: return
+
+    def ref_mu_sd(t, x):
+        m = t >= t0
+        tw = t[m];
+        sw = np.asarray(x, np.float32)[m]
+        tu, su, fs = resample_uniform(tw, sw)
+        if tu is None: return None
+        su = bandpass(su, fs, RESP_BAND, RESP_ORDER)
+        mu, sd = float(np.mean(su)), float(np.std(su) + 1e-9)
+        return (mu, sd)
+
+    ZFIX["dY"] = ref_mu_sd(t_np, dY)
+    ZFIX["dD"] = ref_mu_sd(t_np, dD)
+    ZFIX["dW"] = ref_mu_sd(t_np, dW)
+    ZFIX["dC"] = ref_mu_sd(t_np, dC)
+
+    if SHOW_GT and gt_t is not None:
+        mgt = (gt_t >= t0) & (gt_t <= t1)
+        if np.any(mgt):
+            tu, gu, fs = resample_uniform(gt_t[mgt], gt_resp[mgt])
+            if tu is not None:
+                gu = bandpass(gu, fs, RESP_BAND, RESP_ORDER)
+                ZFIX["GT"] = (float(np.mean(gu)), float(np.std(gu) + 1e-9))
+
+
+# ---------------- Drawing helpers ----------------
+def draw_panel_to(right_img, rect, title, t_seq, sig_seq, color):
+    x1, y1, x2, y2 = rect
+    panel = right_img[y1:y2, x1:x2];
+    panel[:] = BG
+    if len(t_seq) < 2:
+        return
+
+    t_arr = np.asarray(t_seq, np.float32)
+    s_arr = np.asarray(sig_seq, np.float32)
+
+    t1 = t_arr[-1]
+    span = min(SPAN_SEC, (t_arr[-1] - t_arr[0]) if len(t_arr) > 1 else SPAN_SEC)
+    t0 = t1 - span
+    m = t_arr >= t0
+    if np.count_nonzero(m) < 4:
+        return
+    tw = t_arr[m].astype(np.float32);
+    sw = s_arr[m].astype(np.float32)
+    if MA_WIN > 1:
+        sw = moving_average(sw, MA_WIN);
+        tw = tw[-len(sw):]
+
+    stats = band_metrics(tw, sw) if SHOW_GT else {}
+
+    # 표준화(표시 전용)
+    tu, su, fs = resample_uniform(tw, sw)
+    if tu is not None:
+        su = zscore(bandpass(su, fs, RESP_BAND, RESP_ORDER))
+        sw = np.interp(tw, tu, su).astype(np.float32)
+    if SHOW_GT:
+        tg = gt_t if GLOBAL_LAG_SEC is None else (gt_t + GLOBAL_LAG_SEC)
+        mg = (tg >= tw[0]) & (tg <= tw[-1])
+        gv = np.interp(tw, tg[mg], gt_resp[mg]).astype(np.float32) if np.any(mg) else None
+        if gv is not None:
+            tu2, gu2, fs2 = resample_uniform(tw, gv)
+            if tu2 is not None:
+                gu2 = zscore(bandpass(gu2, fs2, RESP_BAND, RESP_ORDER))
+                gv = np.interp(tw, tu2, gu2).astype(np.float32)
+    else:
+        gv = None
+
+    # 시각화 스케일링: 소프트 클립
+    sw_v = soft_clip_z(sw, Z_CLIP)
+    gv_v = soft_clip_z(gv, Z_CLIP) if gv is not None else None
+
+    y_min, y_max = -Z_CLIP, Z_CLIP
+    ph, pw = panel.shape[:2];
+    margin = 10;
+    h = ph - 40;
+    w = pw
+    cv2.rectangle(panel, (0, 30), (w - 1, ph - 1), (40, 40, 40), 1)
+
+    def to_xy(tvec, yvec):
+        xs = (margin + (w - 2 * margin) * np.clip((tvec - t0) / max(1e-6, span), 0, 1)).astype(int)
+        norm = (np.clip(yvec, y_min, y_max) - y_min) / (y_max - y_min + 1e-9)
+        ys = (ph - 1 - margin - (h - 2 * margin) * np.clip(norm, 0, 1)).astype(int)
+        return xs, ys
+
+    for val, label_t in [(-Z_CLIP, f"{-Z_CLIP:.0f}"), (0.0, "0"), (Z_CLIP, f"+{Z_CLIP:.0f}")]:
+        y_pos = int(ph - 1 - margin - (h - 2 * margin) * ((val - y_min) / (y_max - y_min)))
+        cv2.line(panel, (0, y_pos), (6, y_pos), (140, 140, 140), 1)
+        cv2.putText(panel, label_t, (8, y_pos + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (175, 175, 175), 1, cv2.LINE_AA)
+
+    xs, ys = to_xy(tw, sw_v)
+    if len(xs) >= 2:
+        cv2.polylines(panel, [np.stack([xs, ys], 1)], False, color, 2, cv2.LINE_AA)
+    if gv_v is not None:
+        xs2, ys2 = to_xy(tw, gv_v)
+        cv2.polylines(panel, [np.stack([xs2, ys2], 1)], False, (80, 220, 80), 1, cv2.LINE_AA)
+
+    show_dlag = (stats and np.isfinite(stats.get("dlag", np.nan))
+                 and (stats.get("coh", 0) >= 0.45) and (abs(stats.get("corr", 0)) >= 0.25))
+    dlag_txt = safe_fmt(stats["dlag"], "{:+.02f}") + "s" if show_dlag else "--"
+
+    # --- 간결 HUD (coh / corr / Δlag / RR / p) ---
+    if stats:
+        line = (f"coh={safe_fmt(stats['coh'])}  "
+                f"corr={safe_fmt(stats['corr'], '{:+.2f}')}  "
+                f"dlag={dlag_txt}  "
+                f"RR={safe_fmt(stats['rr_bpm'], '{:.1f}')} bpm  "
+                f"p{('<' + safe_fmt(stats['p'], '{:.003f}')) if stats['p'] is not None else '--'}")
+        put(panel, line, (8, 18), 0.50, (200, 200, 200))
+
+    x_cur = int(10 + (panel.shape[1] - 20) * ((t1 - t0) / max(1e-6, span)))
+    cv2.line(panel, (x_cur, 30), (x_cur, panel.shape[0] - 1), (180, 180, 80), 1, cv2.LINE_AA)
+
+    key = title.split()[0]
+    put(panel, key, (panel.shape[1] - 32, panel.shape[0] - 8), 0.55, color)
+
+
+# ---------------- MediaPipe Pose ----------------
+mp_pose = mp.solutions.pose
+pose = mp_pose.Pose(static_image_mode=False, model_complexity=1,
+                    enable_segmentation=False,
+                    min_detection_confidence=0.5, min_tracking_confidence=0.5)
+
+# ---------------- Video ----------------
+cap = cv2.VideoCapture(VIDEO);
+assert cap.isOpened(), "영상 열기 실패"
 fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-prev_tvid = 0.0
-span_idx = SPAN_CHOICES.index(SPAN_SEC) if SPAN_SEC in SPAN_CHOICES else 1
 
+# ---------------- Main loop ----------------
+win_name = "COHFACE v2.7a (minimal HUD, GT-aligned)"
+cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
+cv2.resizeWindow(win_name, VIEW_W, VIEW_H)
+
+prev_ms = 0.0;
+frame_idx = 0
 while True:
     ok, frame = cap.read()
     if not ok: break
+    H, W = frame.shape[:2]
 
-    # 비디오 시간 & 기준시각
-    tvid = (cap.get(cv2.CAP_PROP_POS_MSEC) or (prev_tvid + 1000.0/fps))/1000.0
-    if tvid < prev_tvid: tvid = prev_tvid + 1.0/max(1.0,fps)
-    prev_tvid = tvid
-    t_ref = tvid + t_offset
+    ms = cap.get(cv2.CAP_PROP_POS_MSEC) or (prev_ms + 1000.0 / max(1.0, fps))
+    t = ms / 1000.0
+    if t < prev_ms / 1000.0: t = prev_ms / 1000.0 + 1.0 / max(1.0, fps)
+    prev_ms = ms
+    frame_idx += 1
 
     vis = frame.copy()
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-    # ----- 모션 업데이트 -----
-    if enable_motion:
-        if need_reinit or prev_gray is None or pts_prev is None or len(pts_prev) < 3:
-            pts_prev = auto_points(frame)
-            pts_init = pts_prev.copy()
-            ensure_pair_series()
-            times_vid.clear()
-            need_reinit = False
+    if (frame_idx % POSE_EVERY_N) == 0:
+        rgb_small = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB),
+                               (PROC_W, int(H * PROC_W / W)), interpolation=cv2.INTER_AREA)
+        res = pose.process(rgb_small)
+        if res.pose_landmarks:
+            lm = res.pose_landmarks.landmark
+            h_s, w_s = rgb_small.shape[:2];
+            sx, sy = W / float(w_s), H / float(h_s)
 
-        if prev_gray is not None and pts_prev is not None:
-            pts_next, st, err = cv2.calcOpticalFlowPyrLK(prev_gray, gray, pts_prev, None,
-                                                         winSize=(21,21), maxLevel=3,
-                                                         criteria=(cv2.TERM_CRITERIA_EPS|cv2.TERM_CRITERIA_COUNT,30,0.01))
-            good = (st.reshape(-1)==1) if st is not None else np.zeros((len(pts_prev),),bool)
-            if np.count_nonzero(good) < 3:
-                need_reinit = True
-            else:
-                P  = pts_next.reshape(-1,2)[good]
-                P0 = pts_init.reshape(-1,2)[good]
-                # 필요하면 init도 good만 남김
-                pts_prev = pts_next[good].reshape(-1,1,2).astype(np.float32)
-                pts_init = pts_init[good].reshape(-1,1,2).astype(np.float32)
-                # ΔL 업데이트
-                times_vid.append(float(t_ref))
-                # base 길이 테이블도 good index 기준으로 다시 맞춤 필요
-                # → pair_init_len/pairs 재계산
-                ensure_pair_series() if len(P0)!=len(pair_init_len) else None
-                # init 길이 다시 산출 (점 유지 중에만)
-                Pfull = pts_prev.reshape(-1,2)
-                if len(Pfull)>=2:
-                    for (i,j) in pairs:
-                        if i<len(Pfull) and j<len(Pfull):
-                            L0 = float(np.linalg.norm(pts_init.reshape(-1,2)[i]-pts_init.reshape(-1,2)[j]))
-                            pair_init_len[(i,j)] = max(1e-6, L0)
-                # 실제 ΔL 기록
-                update_motion_series(P)
-                # 오래된 샘플 제거
-                trim_series(max(SPAN_CHOICES)*2)
 
-        # 포인트/ROI 표시
-        if pts_prev is not None:
-            for p in pts_prev.reshape(-1,2):
-                cv2.circle(vis, (int(p[0]),int(p[1])), 3, (240,240,240), -1, cv2.LINE_AA)
-        H,W = vis.shape[:2]
-        if roi_manual is None or roi_manual[2]<10 or roi_manual[3]<10:
-            x1,x2=int(W*0.25),int(W*0.75); y1,y2=int(H*0.55),int(H*0.88)
+            def to_px(pt):
+                return np.array([pt.x * w_s * sx, pt.y * h_s * sy], np.float32)
+
+
+            L = to_px(lm[mp_pose.PoseLandmark.LEFT_SHOULDER])
+            R = to_px(lm[mp_pose.PoseLandmark.RIGHT_SHOULDER])
+            N = to_px(lm[mp_pose.PoseLandmark.NOSE])
+            visL = lm[mp_pose.PoseLandmark.LEFT_SHOULDER].visibility
+            visR = lm[mp_pose.PoseLandmark.RIGHT_SHOULDER].visibility
+            visN = lm[mp_pose.PoseLandmark.NOSE].visibility
+            if min(visL, visR, visN) > 0.5:
+                if prev_L is not None:
+                    if (np.linalg.norm(L - prev_L) > MAX_LMK_JUMP or
+                            np.linalg.norm(R - prev_R) > MAX_LMK_JUMP or
+                            np.linalg.norm(N - prev_N) > MAX_LMK_JUMP):
+                        pass
+                    else:
+                        L_EMA = L if L_EMA is None else EMA_BETA_LMK * L_EMA + (1 - EMA_BETA_LMK) * L
+                        R_EMA = R if R_EMA is None else EMA_BETA_LMK * R_EMA + (1 - EMA_BETA_LMK) * R
+                        N_EMA = N if N_EMA is None else EMA_BETA_LMK * N_EMA + (1 - EMA_BETA_LMK) * N
+                else:
+                    L_EMA, R_EMA, N_EMA = L.copy(), R.copy(), N.copy()
+                prev_L, prev_R, prev_N = L.copy(), R.copy(), N.copy()
+
+    valid = L_EMA is not None and R_EMA is not None and N_EMA is not None
+    if valid:
+        if y0 is None or d0 is None or w0 is None:
+            y0 = float((L_EMA[1] + R_EMA[1]) / 2.0)
+            v = R_EMA - L_EMA;
+            wvec = N_EMA - L_EMA
+            v2 = float(np.dot(v, v)) + 1e-12;
+            tproj = float(np.clip(np.dot(wvec, v) / v2, 0.0, 1.0))
+            foot = L_EMA + tproj * v
+            d_init = v[0] * wvec[1] - v[1] * wvec[0]
+            d0 = float(d_init / (np.sqrt(v2) + 1e-12))
+            w0 = float(np.linalg.norm(R_EMA - L_EMA))
+
+        y_now = float((L_EMA[1] + R_EMA[1]) / 2.0)
+        v = R_EMA - L_EMA;
+        wvec = N_EMA - L_EMA
+        v2 = float(np.dot(v, v)) + 1e-12;
+        tproj = float(np.clip(np.dot(wvec, v) / v2, 0.0, 1.0))
+        foot = L_EMA + tproj * v
+        d_now = (v[0] * wvec[1] - v[1] * wvec[0]) / (np.sqrt(v2) + 1e-12)
+        w_now = float(np.linalg.norm(R_EMA - L_EMA))
+
+        dY_t = y_now - y0
+        dD_t = d_now - d0
+        dW_t = w_now - w0
+
+        # --- 워밍업 1회 polarity 고정 시도 + 부호 적용 ---
+        try_update_polarity_once()
+        if POL_SIGN["dY"] is not None:
+            dY_t *= POL_SIGN["dY"]
+            dD_t *= POL_SIGN["dD"]
+            dW_t *= POL_SIGN["dW"]
+
+        # 이제 부호가 정렬된 값을 버퍼에 저장
+        ts.append(t)
+        dY.append(dY_t)
+        dD.append(dD_t)
+        dW.append(dW_t)
+
+
+        def z_last(buf):
+            arr = np.asarray(buf, np.float32)
+            if arr.size < 5: return 0.0
+            seg = arr[-min(200, len(arr)):]
+            sd = float(np.std(seg)) or 1.0
+            mu = float(np.mean(seg))
+            return float((arr[-1] - mu) / sd)
+
+
+        dC.append((z_last(dY) + z_last(dD) + z_last(dW)) / 3.0)
+
+        # dC_opt 업데이트 게이트 + Ridge+EMA
+        if SHOW_GT and len(ts) >= 32:
+            t_np = np.asarray(ts, np.float32)
+            m = t_np >= (t_np[-1] - SPEC_WIN)
+            stats = band_metrics(t_np[m], np.asarray(dC, np.float32)[m])
+            if stats and (stats.get("coh", 0) >= 0.30) and (stats.get("p", 1.0) < 0.05):
+                tw = t_np[m]
+                Y = np.asarray(dY, np.float32)[m];
+                D = np.asarray(dD, np.float32)[m];
+                Wv = np.asarray(dW, np.float32)[m]
+                tu, yU, fs = resample_uniform(tw, Y)
+                _, dU, _ = resample_uniform(tw, D, fs)
+                _, wU, _ = resample_uniform(tw, Wv, fs)
+                if GLOBAL_LAG_SEC is None:
+                    tg = gt_t;
+                    gg = gt_resp
+                else:
+                    tg = gt_t + GLOBAL_LAG_SEC;
+                    gg = gt_resp
+                mgt = (tg >= tw[0]) & (tg <= tw[-1])
+                if tu is not None and np.any(mgt):
+                    gU = np.interp(tu, tg[mgt], gg[mgt]).astype(np.float32)
+                    yU = zscore(bandpass(yU, fs, RESP_BAND, RESP_ORDER))
+                    dU = zscore(bandpass(dU, fs, RESP_BAND, RESP_ORDER))
+                    wU = zscore(bandpass(wU, fs, RESP_BAND, RESP_ORDER))
+                    gU = zscore(bandpass(gU, fs, RESP_BAND, RESP_ORDER))
+                    X = np.stack([yU, dU, wU], 1);
+                    Yt = gU
+                    XtX = X.T @ X;
+                    XtX[np.diag_indices_from(XtX)] += RIDGE_ALPHA
+                    try:
+                        w_r = np.linalg.solve(XtX, X.T @ Yt)
+                        w_r = w_r / (np.linalg.norm(w_r) + 1e-9)
+                        WC = w_r if WC is None else (W_EMA_BETA * WC + (1.0 - W_EMA_BETA) * w_r)
+                    except Exception:
+                        pass
+
+
+        # 학습과 동일한 도메인(표준화)에서 합성
+        def z_now(buf):
+            arr = np.asarray(buf, np.float32)
+            if arr.size < 5: return 0.0
+            seg = arr[-min(200, len(arr)):]
+            mu, sd = float(np.mean(seg)), float(np.std(seg)) or 1.0
+            return float((arr[-1] - mu) / sd)
+
+
+        if WC is not None:
+            zY, zD, zW = z_now(dY), z_now(dD), z_now(dW)
+            dC_opt.append(float(WC[0] * zY + WC[1] * zD + WC[2] * zW))
         else:
-            x1,y1,w,h=roi_manual; x2,y2=x1+w,y1+h
-        cv2.rectangle(vis,(x1,y1),(x2,y2),(160,160,160),1,cv2.LINE_AA)
+            dC_opt.append(0.0)
 
-    prev_gray = gray
+        while len(ts) and (ts[-1] - ts[0] > HIS_SEC):
+            ts.popleft();
+            dY.popleft();
+            dD.popleft();
+            dW.popleft();
+            dC.popleft();
+            dC_opt.popleft()
 
-    # ----- 상관 Top-3 계산 -----
-    top_pairs=[]
-    if enable_motion and len(times_vid)>=8 and pairs:
-        t_end = times_vid[-1]
-        scores=[]
-        for k in pairs:
-            c = corr_against_resp(k, t_end, CORR_WIN)
-            if np.isfinite(c): scores.append((abs(c), c, k))   # 정렬은 abs, 보고는 부호 유지
-        scores.sort(reverse=True)
-        top_pairs = scores[:3]
-
-    # ----- 레이아웃: 좌 비디오 / 우 Top3 ΔL / 하단 GT -----
-    H,W = vis.shape[:2]
-    side_w = 360
-    PANEL_TEXT_H = 60
-    TRACK_H = 100
-    SEP = 8
-    bottom_h = PANEL_TEXT_H + 4*TRACK_H + 3*SEP
-
-    # 우측 패널 (Top3 ΔL)
-    side = np.full((H, side_w, 3), BG, np.uint8)
-    put(side, "Top-3 segments (dL)", (12, 26), 0.78)
-    # 각 트랙(3개)을 위에서부터 그리기
-    def draw_dl(track_idx, pair_key, color=(220,220,220)):
-        h0 = 40 + track_idx*(H-60)//3
-        h  = (H-100)//3
-        panel = side[h0:h0+h, :]
-        t0 = (times_vid[-1]-SPAN_CHOICES[span_idx]) if len(times_vid) else 0.0
-        draw_axis(panel, -1, 1, f"{pair_key}  (corr {scores_map[pair_key]:+.2f})")
-        if len(times_vid):
-            tv = np.array(times_vid, np.float32)
-            yv = np.array(pair_series[pair_key], np.float32)
-            # 최근 스팬만, 정규화
-            m = (tv >= tv[-1]-SPAN_CHOICES[span_idx]) & np.isfinite(yv)
-            if np.any(m):
-                ym = yv[m]; ym = ym - np.median(ym)
-                denom = np.percentile(np.abs(ym), 95) + 1e-6
-                ym = np.clip(ym/denom, -1, 1)
-                plot_series_scaled(panel, tv[m], ym, tv[-1]-SPAN_CHOICES[span_idx], SPAN_CHOICES[span_idx], -1, 1, color=color)
-
-    scores_map = {}
-    for rank, (a, c, k) in enumerate(top_pairs):
-        scores_map[k] = c
-        col = [(60,220,240), (60,220,120), (240,220,60)][rank]
-        draw_dl(rank, k, color=col)
-
-    # Top-3 선분을 영상에 오버레이
-    if top_pairs and pts_prev is not None:
-        P = pts_prev.reshape(-1,2)
-        for rank, (_, c, (i,j)) in enumerate(top_pairs):
-            col = pair_colors[rank]
-            if i<len(P) and j<len(P):
-                cv2.line(vis, (int(P[i,0]),int(P[i,1])), (int(P[j,0]),int(P[j,1])), col, 3, cv2.LINE_AA)
-                put(vis, f"{(i,j)}:{c:+.2f}", (int((P[i,0]+P[j,0])/2), int((P[i,1]+P[j,1])/2)-6), 0.6, col, 2)
-
-    # ----- 하단 GT 패널 -----
-    panel = np.full((bottom_h, W+side_w, 3), BG, np.uint8)
-    # 텍스트
-    # tt 기준 현재 HR/RR
-    t_clip = np.clip(t_ref, T_START, T_END)
-    i_ref = int(np.clip(np.searchsorted(tt, t_clip, side="left"), 0, len(tt)-1))
-    hr_now = float(HR_t[i_ref]) if np.isfinite(HR_t[i_ref]) else float("nan")
-    rr_now = float(RR_t[i_ref]) if np.isfinite(RR_t[i_ref]) else float("nan")
-    put(panel, f"t_video:{tvid:06.2f}s   t_ref(tt):{t_clip:06.2f}s   offset:{t_offset:+.2f}s   "
-               f"win:{WIN_SEC}s   span:{SPAN_CHOICES[span_idx]}s   motion:{'ON' if enable_motion else 'OFF'} "
-               f"axis:{'V' if use_vertical_only else 'L2'}",
-        (12, 26), 0.78)
-    put(panel, f"HR_gt:{hr_now:.1f} bpm    RR_gt:{rr_now:.1f} brpm", (12, 52), 0.78)
-
-    # y-스케일
-    t1 = t_clip; t0 = max(T_START, t1 - SPAN_CHOICES[span_idx])
-    if auto_scale:
-        mhr = (tt>=t0)&(tt<=t1)&np.isfinite(HR_t); HR_MIN,HR_MAX=(float(np.nanmin(HR_t[mhr])-5), float(np.nanmax(HR_t[mhr])+5)) if np.any(mhr) else (40,140)
-        mrr = (tt>=t0)&(tt<=t1)&np.isfinite(RR_t); RR_MIN,RR_MAX=(float(np.nanmin(RR_t[mrr])-2), float(np.nanmax(RR_t[mrr])+2)) if np.any(mrr) else (6,30)
+        pL = tuple(np.round(L_EMA).astype(int));
+        pR = tuple(np.round(R_EMA).astype(int))
+        pN = tuple(np.round(N_EMA).astype(int));
+        pF = tuple(np.round(foot).astype(int))
+        cv2.circle(vis, pL, 6, (40, 230, 255), -1, cv2.LINE_AA)
+        cv2.circle(vis, pR, 6, (40, 230, 255), -1, cv2.LINE_AA)
+        cv2.circle(vis, pN, 6, (180, 200, 80), -1, cv2.LINE_AA)
+        cv2.line(vis, pL, pR, (230, 230, 230), 3, cv2.LINE_AA)
+        cv2.line(vis, pN, pF, (120, 200, 120), 2, cv2.LINE_AA)
+        put(vis, f"dY:{dY_t:+.2f}px  dD:{dD_t:+.2f}px  dW:{dW_t:+.2f}px", (12, 28), 0.9, HUD_COL)
+        if WC is not None:
+            put(vis, f"w=[{WC[0]:+.2f},{WC[1]:+.2f},{WC[2]:+.2f}]  (ridge+EMA)", (12, 52), 0.7, HUD_COL)
     else:
-        HR_MIN,HR_MAX=(40,140); RR_MIN,RR_MAX=(6,30)
+        put(vis, "Waiting shoulders + nose...", (12, 28), 0.8, (80, 180, 255))
 
-    # 4트랙
-    y = 60; TH=100; SEP=8
-    # 1) pulse
-    p1 = panel[y:y+TH, :W]; y += TH+SEP
-    draw_axis(p1, -2, 2, "pulse (norm, bandpassed) [tt]")
-    plot_series_scaled(p1, tt, pulse_vis, t0, SPAN_CHOICES[span_idx], -2, 2)
-    # 2) respiration
-    p2 = panel[y:y+TH, :W]; y += TH+SEP
-    draw_axis(p2, -2, 2, "respiration (norm) [tt]")
-    plot_series_scaled(p2, tt, resp_std, t0, SPAN_CHOICES[span_idx], -2, 2)
-    # 3) HR
-    p3 = panel[y:y+TH, :W]; y += TH+SEP
-    draw_axis(p3, HR_MIN, HR_MAX, "HR_gt (bpm) [tt]")
-    plot_series_scaled(p3, tt, HR_t, t0, SPAN_CHOICES[span_idx], HR_MIN, HR_MAX)
-    # 4) RR
-    p4 = panel[y:y+TH, :W]; y += TH+SEP
-    draw_axis(p4, RR_MIN, RR_MAX, "RR_gt (brpm) [tt]")
-    plot_series_scaled(p4, tt, RR_t, t0, SPAN_CHOICES[span_idx], RR_MIN, RR_MAX)
+    try_update_zfix()
+    learn_global_lag_once()
 
-    # 커서
-    def draw_cursor(p, t0, span):
-        h,w=p.shape[:2]; mrg=8
-        x=int(mrg + (w-2*mrg)*((t_clip - t0)/max(1e-9, span)))
-        cv2.line(p,(x,0),(x,h-1),(180,180,80),1,cv2.LINE_AA)
-    for sp in (p1,p2,p3,p4): draw_cursor(sp, t0, SPAN_CHOICES[span_idx])
+    left_w = int(VIEW_W * LEFT_RATIO)
+    right_w = VIEW_W - left_w
+    left = cv2.resize(vis, (left_w, VIEW_H), interpolation=cv2.INTER_AREA)
 
-    # ----- 합성 및 표시 -----
-    top_row = np.hstack([vis, side])
-    bottom   = panel
-    canvas   = np.vstack([top_row, bottom])
-    cv2.imshow(win, canvas)
+    put(left, f"{t:.1f}s", TIMER_POS, 1.0, (210, 210, 210))
+    if GLOBAL_LAG_TEXT:
+        put(left, GLOBAL_LAG_TEXT, (12, 80), 0.6, (180, 220, 220))
 
-    # ----- 입력 -----
+    right = np.full((VIEW_H, right_w, 3), BG, np.uint8)
+    Rw, Rh = right_w, VIEW_H
+    gap = 8
+    cell_w = (Rw - 3 * gap) // 2
+    cell_h = (Rh - 3 * gap) // 2
+    cells = [
+        (gap, gap, gap + cell_w, gap + cell_h),  # dY
+        (gap, 2 * gap + cell_h, gap + cell_w, 2 * gap + 2 * cell_h),  # dD
+        (2 * gap + cell_w, gap, 2 * gap + 2 * cell_w, gap + cell_h),  # dW
+        (2 * gap + cell_w, 2 * gap + cell_h, 2 * gap + 2 * cell_w, 2 * gap + 2 * cell_h),  # dC
+    ]
+
+    tnp = np.asarray(ts, np.float32)
+    draw_panel_to(right, cells[0], "dY vs GT", tnp, np.asarray(dY, np.float32), COLORS["dY"])
+    draw_panel_to(right, cells[1], "dD vs GT", tnp, np.asarray(dD, np.float32), COLORS["dD"])
+    draw_panel_to(right, cells[2], "dW vs GT", tnp, np.asarray(dW, np.float32), COLORS["dW"])
+    draw_panel_to(right, cells[3], "dC vs GT", tnp, np.asarray(dC, np.float32), COLORS["dC"])
+
+    # dC_opt (얇게)
+    x1, y1, x2, y2 = cells[3];
+    panel = right[y1:y2, x1:x2]
+    if len(ts) > 8:
+        t_arr = np.asarray(ts, np.float32);
+        s_arr = np.asarray(dC_opt, np.float32)
+        t1 = t_arr[-1];
+        span = min(SPAN_SEC, (t_arr[-1] - t_arr[0]))
+        t0 = t1 - span;
+        m = t_arr >= t0
+        if np.count_nonzero(m) >= 4:
+            tw = t_arr[m];
+            sw = s_arr[m]
+            if MA_WIN > 1:
+                sw = moving_average(sw, MA_WIN);
+                tw = tw[-len(sw):]
+            tu, su, fs = resample_uniform(tw, sw)
+            if tu is not None:
+                from numpy import interp
+
+                su = zscore(bandpass(su, fs, RESP_BAND, RESP_ORDER))
+                sw = np.interp(tw, tu, su).astype(np.float32)
+            if VIZ_MODE == "zfix" and ZFIX.get("dC") is not None:
+                mu, sd = ZFIX["dC"];
+                sw_v = (sw - mu) / (sd + 1e-9)
+            elif VIZ_MODE == "zwin":
+                sw_v = zscore(sw)
+            else:
+                sw_v = sw
+            ph, pw = panel.shape[:2];
+            margin = 10;
+            h = ph - 40;
+            w = pw
+            y_min, y_max = -Z_CLIP, Z_CLIP
+            xs = (margin + (w - 2 * margin) * np.clip((tw - t0) / max(1e-6, span), 0, 1)).astype(int)
+            norm = (np.clip(sw_v, y_min, y_max) - y_min) / (y_max - y_min + 1e-9)
+            ys = (ph - 1 - margin - (h - 2 * margin) * np.clip(norm, 0, 1)).astype(int)
+            if len(xs) >= 2:
+                cv2.polylines(panel, [np.stack([xs, ys], 1)], False, (180, 255, 255), 1, cv2.LINE_AA)
+                put(panel, "dC_opt (ridge+EMA)", (12, panel.shape[0] - 8), 0.5, (180, 255, 255))
+
+    canvas = np.hstack([left, right])
+    cv2.imshow(win_name, canvas)
     key = cv2.waitKey(1) & 0xFF
-    if key==27: break
-    elif key in (ord('1'),ord('2'),ord('4'),ord('8')):
-        WIN_SEC = {ord('1'):12, ord('2'):2, ord('4'):4, ord('8'):8}[key]
-        HR_t = sliding_map(pulse, tt, fs, WIN_SEC, hr_from_win)
-        RR_t = sliding_map(resp,  tt, fs, WIN_SEC, rr_from_win)
-    elif key==ord('g'):
-        span_idx = (span_idx + 1) % len(SPAN_CHOICES)
-    elif key==ord('a'):
-        auto_scale = not auto_scale
-    elif key==ord('m'):
-        enable_motion = not enable_motion
-    elif key==ord('v'):
-        use_vertical_only = not use_vertical_only
-    elif key==ord('r'):
-        need_reinit = True; times_vid.clear()
-        pair_series.clear()
-    elif key==ord('c'):
-        # 드래그로 ROI 잡기 → r로 재배치
-        pass
-    elif key==ord('['):  t_offset -= 0.1
-    elif key==ord(']'):  t_offset += 0.1
-    elif key==ord('{'):  t_offset -= 1.0
-    elif key==ord('}'):  t_offset += 1.0
+    if key == 27: break
 
+pose.close()
 cap.release()
 cv2.destroyAllWindows()
