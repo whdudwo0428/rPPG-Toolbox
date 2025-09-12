@@ -5,7 +5,7 @@ import h5py
 import numpy as np
 from tqdm import tqdm
 
-from pose_backend import make_pose_landmarker, extract_displacements
+from .pose_backend import make_pose_landmarker, extract_displacements
 from . import config
 from .config import DATA_ROOT, CACHE_DIR, FS_EXTRACT, FS_MODEL
 from .utils import resample_uniform, align_common_time, estimate_global_lag

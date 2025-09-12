@@ -19,6 +19,7 @@ COHFACE 전체 데이터에서 **어깨·코 기반 변위(dY, dD, dW)** 를 추
 
 ```
 cohface_exp_reg/
+  __init__.py
   config.py
   utils.py
   pose_backend.py
@@ -26,12 +27,14 @@ cohface_exp_reg/
   data.py
   models.py
   train.py
+  sampler.py
   run_extract_all.py
   run_train_lstm.py
   run_train_gru.py
   assets/pose_landmarker_full.task     # ← 직접 다운로드
   cache_cohface_feats/                 # ← 자동 생성
   runs/                                # ← 자동 생성
+
 ```
 
 ---
@@ -82,7 +85,7 @@ export RUNS_DIR="cohface_exp_reg/runs"
 export HR_WIN_LIST="8,16"      # HR 윈도우(초)
 export RR_WIN_LIST="32,64"     # RR 윈도우(초)
 export STRIDE_FRAC="0.25"      # 각 윈도우의 25%로 슬라이딩
-# export FIXED_STRIDE="2.0"    # 고정 stride(초)로 쓰고 싶을 때
+# export FIXED_STRIDE="2.0"    # 고정 stride(초)로 쓸 때
 
 # 메모리 단편화 완화
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
@@ -95,7 +98,7 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 ## 2) 특징 추출/전처리 캐시
 
 ```bash
-python cohface_exp_reg/run_extract_all.py \
+python -m cohface_exp_reg.run_extract_all \
   --root /home/gongjae/PycharmProjects/rPPG-Toolbox/dataset/cohface \
   --subjects 1-40 --sessions 0-3 \
   --out cohface_exp_reg/cache_cohface_feats \
@@ -125,7 +128,7 @@ python cohface_exp_reg/run_extract_all.py \
 ### LSTM
 
 ```bash
-python cohface_exp_reg/run_train_lstm.py \
+python -m cohface_exp_reg.run_train_lstm \
   --cache cohface_exp_reg/cache_cohface_feats \
   --epochs 50 --lr 1e-3 --cuda 0 \
   --hidden 128 --layers 2 --bidir 1 --dropout 0.1 \
@@ -136,11 +139,12 @@ python cohface_exp_reg/run_train_lstm.py \
 ### GRU
 
 ```bash
-python cohface_exp_reg/run_train_gru.py \
+python -m cohface_exp_reg.run_train_gru \
   --cache cohface_exp_reg/cache_cohface_feats \
-  --epochs 50 --batch_size 64 --lr 1e-3 --cuda 0 \
+  --epochs 50 --lr 1e-3 --cuda 0 \
   --hidden 256 --layers 3 --bidir 0 --dropout 0.0 \
-  --hr_wins 8,16 --rr_wins 32,64 --stride_frac 0.25
+  --hr_wins 8,16 --rr_wins 32,64 --stride_frac 0.25 \
+  --bucket_bs "16384:2,8192:4,4096:16,2048:32"
 ```
 
 * 장치 로그 예:

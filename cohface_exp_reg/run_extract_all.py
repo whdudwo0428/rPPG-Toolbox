@@ -4,7 +4,8 @@ import os
 
 from tqdm import tqdm
 
-import preprocess  # 내부 모듈
+from . import preprocess
+from . import config
 from .config import DATA_ROOT, CACHE_DIR, FS_RESAMP, RESP_BAND
 
 
@@ -67,12 +68,12 @@ def main():
     ap.add_argument("--resp_hi", type=float, default=None)
     args = ap.parse_args()
 
-    root = args.root or DATA_ROOT
-    out  = args.out  or CACHE_DIR
-    fs   = args.fs or FS_RESAMP
+    root = args.root or config.DATA_ROOT
+    out = args.out or config.CACHE_DIR
+    fs = args.fs or config.FS_RESAMP
+    resp_band = (args.resp_lo, args.resp_hi) if args.resp_lo is not None else config.RESP_BAND
     lo   = args.resp_lo if args.resp_lo is not None else RESP_BAND[0]
     hi   = args.resp_hi if args.resp_hi is not None else RESP_BAND[1]
-    resp_band = (float(lo), float(hi))
 
     os.makedirs(out, exist_ok=True)
 
