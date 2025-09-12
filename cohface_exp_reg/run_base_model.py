@@ -1,3 +1,8 @@
+# cohface_exp_reg/run_base_model.py
+# 실행은 모듈 모드 필수:
+#   python -m cohface_exp_reg.run_base_model --cell LSTM  [args...]
+#   python -m cohface_exp_reg.run_base_model --cell GRU   [args...]
+
 import argparse
 import json
 import os
@@ -15,7 +20,8 @@ from .utils import set_seed, subject_split
 
 
 def parse_float_list(s):
-    if s is None: return None
+    if s is None:
+        return None
     try:
         vals = [float(x) for x in str(s).split(",") if str(x).strip() != ""]
         return vals if len(vals) > 0 else None
@@ -25,6 +31,8 @@ def parse_float_list(s):
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--cell", type=str, required=True, choices=["LSTM", "GRU", "lstm", "gru"],
+                    help="sequence cell type")
     ap.add_argument("--cache", default=None, help="cache dir (npz) override")
     ap.add_argument("--epochs", type=int, default=None)
     ap.add_argument("--batch_size", type=int, default=None, help="fallback batch_size (when no bucket_bs)")
@@ -33,7 +41,7 @@ def main():
     ap.add_argument("--hidden", type=int, default=128)
     ap.add_argument("--layers", type=int, default=2)
     ap.add_argument("--bidir", type=int, default=1)
-    ap.add_argument("--dropout", type=float, default=0.0)
+    ap.add_argument("--dropout", type=float, default=0.1)
     ap.add_argument("--hr_wins", default=None, help="comma sep, e.g. 8,16")
     ap.add_argument("--rr_wins", default=None, help="comma sep, e.g. 32,64")
     ap.add_argument("--stride_frac", type=float, default=None)
@@ -44,7 +52,7 @@ def main():
     ap.add_argument("--seed", type=int, default=None)
     args = ap.parse_args()
 
-    # ---- config overrides (CLI 우선, 없으면 config/기본값) ----
+    # ---------------- config overrides (CLI 우선) ----------------
     FS_MODEL = getattr(config, "FS_MODEL", getattr(config, "FS_RESAMP", 256))
     SEED = args.seed if args.seed is not None else getattr(config, "SEED", getattr(config, "SPLIT_SEED", 42))
 
@@ -57,7 +65,7 @@ def main():
     if args.lr is not None:
         config.LR = args.lr
 
-    # 멀티스케일 파라미터
+    # 멀티스케일 파라미터 기본값 보장
     if not hasattr(config, "HR_WIN_LIST"):
         config.HR_WIN_LIST = [8.0, 16.0]
     if not hasattr(config, "RR_WIN_LIST"):
@@ -78,27 +86,28 @@ def main():
     if args.fixed_stride is not None:
         config.FIXED_STRIDE = float(args.fixed_stride)
 
-    # 디바이스 설정
+    # 디바이스
     device = getattr(config, "DEVICE", "cpu")
     if args.cuda is not None:
         device = "cpu" if args.cuda < 0 else f"cuda:{args.cuda}"
         config.DEVICE = device
 
-    print(f"[cfg] device={device}  cache_dir={getattr(config, 'CACHE_DIR', 'cohface_exp_reg/cache_cohface_feats')}")
-    print(
-        f"[cfg] HR_WIN_LIST={config.HR_WIN_LIST}  RR_WIN_LIST={config.RR_WIN_LIST}  stride_frac={config.STRIDE_FRAC}  fixed_stride={config.FIXED_STRIDE}")
+    cell = args.cell.upper()
+    assert cell in ("LSTM", "GRU")
+    print(f"[cfg] cell={cell}  device={device}  cache_dir={getattr(config,'CACHE_DIR','cohface_exp_reg/cache_cohface_feats')}")
+    print(f"[cfg] HR_WIN_LIST={config.HR_WIN_LIST}  RR_WIN_LIST={config.RR_WIN_LIST}  stride_frac={config.STRIDE_FRAC}  fixed_stride={config.FIXED_STRIDE}")
     print(f"[cfg] bucket_bs={args.bucket_bs}")
 
     set_seed(SEED)
 
-    # ---- load cache entries & subject split ----
+    # ---------------- load cache entries & subject split ----------------
     entries = load_all_entries()
     subs = [int(e["subject"]) for e in entries]
     trS, vaS, teS = subject_split(subs, ratios=(0.7, 0.15, 0.15), seed=SEED)
 
     train_entries = [E for E in entries if int(E["subject"]) in trS]
-    val_entries = [E for E in entries if int(E["subject"]) in vaS]
-    test_entries = [E for E in entries if int(E["subject"]) in teS]
+    val_entries   = [E for E in entries if int(E["subject"]) in vaS]
+    test_entries  = [E for E in entries if int(E["subject"]) in teS]
 
     ds_tr = CohfaceSeqDataset(train_entries, "train",
                               rr_win_list=config.RR_WIN_LIST, hr_win_list=config.HR_WIN_LIST,
@@ -110,7 +119,7 @@ def main():
                               rr_win_list=config.RR_WIN_LIST, hr_win_list=config.HR_WIN_LIST,
                               stride_frac=config.STRIDE_FRAC, fixed_stride=config.FIXED_STRIDE)
 
-    # ---- DataLoaders: bucket sampler or fixed batch size ----
+    # ---------------- DataLoaders: bucket sampler or fixed batch size ----------------
     pin = device.startswith("cuda")
     use_bucket = isinstance(args.bucket_bs, str) and args.bucket_bs.strip() != ""
     if use_bucket:
@@ -132,29 +141,30 @@ def main():
         dl_te = DataLoader(ds_te, batch_size=bs, shuffle=False,
                            num_workers=args.num_workers, pin_memory=pin, collate_fn=pad_collate)
 
-    # ---- Model ----
-    model = SeqRegressor(cell="GRU", hidden=args.hidden, layers=args.layers,
+    # ---------------- Model ----------------
+    model = SeqRegressor(cell=cell, hidden=args.hidden, layers=args.layers,
                          bidir=bool(args.bidir), dropout=args.dropout)
 
-    # ---- Tag / run dir ----
+    # ---------------- Tag / run dir ----------------
+    cell_tag = cell.lower()
     tag = (
-        f"gru_h{args.hidden}x{args.layers}_bi{int(bool(args.bidir))}_do{args.dropout:g}_"
+        f"{cell_tag}_h{args.hidden}x{args.layers}_bi{int(bool(args.bidir))}_do{args.dropout:g}_"
         f"mscale_hr{'-'.join(str(int(w)) for w in config.HR_WIN_LIST)}_"
         f"rr{'-'.join(str(int(w)) for w in config.RR_WIN_LIST)}_"
-        f"{'bkt' + args.bucket_bs.replace(',', '-').replace(':', 'x') if use_bucket else 'bs' + str(getattr(config, 'BATCH', args.batch_size or 64))}_"
+        f"{'bkt'+args.bucket_bs.replace(',','-').replace(':','x') if use_bucket else 'bs'+str(getattr(config,'BATCH',args.batch_size or 64))}_"
         f"{time.strftime('%Y%m%d_%H%M%S')}"
     )
 
-    # ---- Train ----
+    # ---------------- Train ----------------
     out_dir, best = train_loop(model, dl_tr, dl_va, tag)
 
-    # ---- Reload best & evaluate ----
+    # ---------------- Reload best & evaluate ----------------
     ckpt = os.path.join(out_dir, "best_model.pt")
     state = torch.load(ckpt, map_location="cpu", weights_only=True)
     model.load_state_dict(state)
 
     metrics = {
-        "val": evaluate(model, dl_va, FS_MODEL),
+        "val":  evaluate(model, dl_va, FS_MODEL),
         "test": evaluate(model, dl_te, FS_MODEL),
         "best": best
     }

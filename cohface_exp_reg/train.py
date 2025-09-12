@@ -5,11 +5,11 @@ from typing import Dict
 
 import numpy as np
 import torch
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 
 from .config import DEVICE, RUNS_DIR, LR, EPOCHS, PATIENCE
-
+from .utils import estimate_rr_bpm
 
 def corrcoef_masked(x, y, mask, eps=1e-8):
     m = (mask > 0.5).float()
@@ -31,7 +31,7 @@ def train_loop(model, train_loader: DataLoader, val_loader: DataLoader, tag: str
     try: torch.set_float32_matmul_precision("high")
     except Exception: pass
     opt = torch.optim.Adam(model.parameters(), lr=LR)
-    scaler = GradScaler(enabled=DEVICE.startswith("cuda"))
+    scaler = GradScaler("cuda", enabled=DEVICE.startswith("cuda"))
 
     best = {"val_loss": 1e9, "epoch": 0, "corr_rr": 0.0}; patience = 0
     for epoch in range(1, EPOCHS+1):
@@ -40,7 +40,7 @@ def train_loop(model, train_loader: DataLoader, val_loader: DataLoader, tag: str
             X = X.to(DEVICE).float(); Y = Y.to(DEVICE).float()
             M = M.to(DEVICE).float(); P = pad_mask.to(DEVICE).float()
 
-            with autocast(enabled=DEVICE.startswith("cuda")):
+            with autocast("cuda", enabled=DEVICE.startswith("cuda")):
                 pred = model(X)  # [B,T,2]
                 mask_rr = (M[:,:,0:1] * P); mask_hr = (M[:,:,1:2] * P)
                 def masked_mse(p, y, m):
@@ -63,7 +63,7 @@ def train_loop(model, train_loader: DataLoader, val_loader: DataLoader, tag: str
             for X,Y,M,pad_mask,*_ in val_loader:
                 X=X.to(DEVICE).float(); Y=Y.to(DEVICE).float()
                 M=M.to(DEVICE).float(); P=pad_mask.to(DEVICE).float()
-                with autocast(enabled=DEVICE.startswith("cuda")):
+                with autocast("cuda", enabled=DEVICE.startswith("cuda")):
                     pred = model(X)
                     mask_rr = (M[:,:,0:1] * P); mask_hr = (M[:,:,1:2] * P)
                     def masked_mse(p, y, m):
@@ -98,7 +98,7 @@ def evaluate(model, loader: DataLoader, fs_model: float) -> Dict[str,float]:
         for X,Y,M,pad_mask,*_ in loader:
             X=X.to(DEVICE).float(); Y=Y.to(DEVICE).float()
             M=M.to(DEVICE).float(); P=pad_mask.to(DEVICE).float()
-            with autocast(enabled=DEVICE.startswith("cuda")):
+            with autocast("cuda", enabled=DEVICE.startswith("cuda")):
                 pred=model(X)
             mask_rr = (M[:,:,0:1] * P); mask_hr = (M[:,:,1:2] * P)
             def masked_rmse(p, y, m):
@@ -114,7 +114,6 @@ def evaluate(model, loader: DataLoader, fs_model: float) -> Dict[str,float]:
                 if m.sum() >= int(6*fs_model):
                     y_gt = Y[b,m,0].detach().cpu().numpy()
                     y_pr = pred[b,m,0].detach().cpu().numpy()
-                    from utils import estimate_rr_bpm
                     gt_bpm = estimate_rr_bpm(y_gt, fs_model)
                     pr_bpm = estimate_rr_bpm(y_pr, fs_model)
                     if np.isfinite(gt_bpm) and np.isfinite(pr_bpm):
