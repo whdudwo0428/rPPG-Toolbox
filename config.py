@@ -397,7 +397,7 @@ def update_config(config, args):
     # update flag from config file
     _update_config_from_file(config, args.config_file)
     config.defrost()
-    
+
     # UPDATE TRAIN PATHS
     if config.TRAIN.DATA.FILE_LIST_PATH == default_TRAIN_FILE_LIST_PATH:
         config.TRAIN.DATA.FILE_LIST_PATH = os.path.join(config.TRAIN.DATA.CACHED_PATH, 'DataFileLists')
@@ -421,14 +421,14 @@ def update_config(config, args):
     name, ext = os.path.splitext(config.TRAIN.DATA.FILE_LIST_PATH)
     if not ext: # no file extension
         FOLD_STR = '_' + config.TRAIN.DATA.FOLD.FOLD_NAME if config.TRAIN.DATA.FOLD.FOLD_NAME else ''
-        config.TRAIN.DATA.FILE_LIST_PATH = os.path.join(config.TRAIN.DATA.FILE_LIST_PATH, \
-                                                        config.TRAIN.DATA.EXP_DATA_NAME + '_' + \
-                                                        str(config.TRAIN.DATA.BEGIN) + '_' + \
-                                                        str(config.TRAIN.DATA.END) + \
+        config.TRAIN.DATA.FILE_LIST_PATH = os.path.join(config.TRAIN.DATA.FILE_LIST_PATH,
+                                                        config.TRAIN.DATA.EXP_DATA_NAME + '_' +
+                                                        str(config.TRAIN.DATA.BEGIN) + '_' +
+                                                        str(config.TRAIN.DATA.END) +
                                                         FOLD_STR + '.csv')
     elif ext != '.csv':
         raise ValueError('TRAIN dataset FILE_LIST_PATH must either be a directory path or a .csv file name')
-    
+
     if ext == '.csv' and config.TRAIN.DATA.DO_PREPROCESS:
         raise ValueError('User specified TRAIN dataset FILE_LIST_PATH .csv file already exists. \
                          Please turn DO_PREPROCESS to False or delete existing TRAIN dataset FILE_LIST_PATH .csv file.')
@@ -457,10 +457,10 @@ def update_config(config, args):
         name, ext = os.path.splitext(config.VALID.DATA.FILE_LIST_PATH)
         if not ext:  # no file extension
             FOLD_STR = '_' + config.VALID.DATA.FOLD.FOLD_NAME if config.VALID.DATA.FOLD.FOLD_NAME else ''
-            config.VALID.DATA.FILE_LIST_PATH = os.path.join(config.VALID.DATA.FILE_LIST_PATH, \
-                                                            config.VALID.DATA.EXP_DATA_NAME + '_' + \
-                                                            str(config.VALID.DATA.BEGIN) + '_' + \
-                                                            str(config.VALID.DATA.END) + \
+            config.VALID.DATA.FILE_LIST_PATH = os.path.join(config.VALID.DATA.FILE_LIST_PATH,
+                                                            config.VALID.DATA.EXP_DATA_NAME + '_' +
+                                                            str(config.VALID.DATA.BEGIN) + '_' +
+                                                            str(config.VALID.DATA.END) +
                                                             FOLD_STR + '.csv')
         elif ext != '.csv':
             raise ValueError('VALIDATION dataset FILE_LIST_PATH must either be a directory path or a .csv file name')
@@ -494,10 +494,10 @@ def update_config(config, args):
     name, ext = os.path.splitext(config.TEST.DATA.FILE_LIST_PATH)
     if not ext: # no file extension
         FOLD_STR = '_' + config.TEST.DATA.FOLD.FOLD_NAME if config.TEST.DATA.FOLD.FOLD_NAME else ''
-        config.TEST.DATA.FILE_LIST_PATH = os.path.join(config.TEST.DATA.FILE_LIST_PATH, \
-                                                       config.TEST.DATA.EXP_DATA_NAME + '_' + \
-                                                       str(config.TEST.DATA.BEGIN) + '_' + \
-                                                       str(config.TEST.DATA.END) + \
+        config.TEST.DATA.FILE_LIST_PATH = os.path.join(config.TEST.DATA.FILE_LIST_PATH,
+                                                       config.TEST.DATA.EXP_DATA_NAME + '_' +
+                                                       str(config.TEST.DATA.BEGIN) + '_' +
+                                                       str(config.TEST.DATA.END) +
                                                        FOLD_STR + '.csv')
     elif ext != '.csv':
         raise ValueError('TEST dataset FILE_LIST_PATH must either be a directory path or a .csv file name')
@@ -505,7 +505,6 @@ def update_config(config, args):
     if ext == '.csv' and config.TEST.DATA.DO_PREPROCESS:
         raise ValueError('User specified TEST dataset FILE_LIST_PATH .csv file already exists. \
                          Please turn DO_PREPROCESS to False or delete existing TEST dataset FILE_LIST_PATH .csv file.')
-    
 
     # UPDATE MODEL_FILE_NAME IF NEEDED
     if any(aug != 'None' for aug in config.TRAIN.DATA.PREPROCESS.DATA_AUG + config.VALID.DATA.PREPROCESS.DATA_AUG + config.TEST.DATA.PREPROCESS.DATA_AUG):
@@ -564,10 +563,10 @@ def update_config(config, args):
     name, ext = os.path.splitext(config.UNSUPERVISED.DATA.FILE_LIST_PATH)
     if not ext: # no file extension
         FOLD_STR = '_' + config.UNSUPERVISED.DATA.FOLD.FOLD_NAME if config.UNSUPERVISED.DATA.FOLD.FOLD_NAME else ''
-        config.UNSUPERVISED.DATA.FILE_LIST_PATH = os.path.join(config.UNSUPERVISED.DATA.FILE_LIST_PATH, \
-                                                        config.UNSUPERVISED.DATA.EXP_DATA_NAME + '_' + \
-                                                        str(config.UNSUPERVISED.DATA.BEGIN) + '_' + \
-                                                        str(config.UNSUPERVISED.DATA.END) + \
+        config.UNSUPERVISED.DATA.FILE_LIST_PATH = os.path.join(config.UNSUPERVISED.DATA.FILE_LIST_PATH,
+                                                        config.UNSUPERVISED.DATA.EXP_DATA_NAME + '_' +
+                                                        str(config.UNSUPERVISED.DATA.BEGIN) + '_' +
+                                                        str(config.UNSUPERVISED.DATA.END) +
                                                         FOLD_STR + '.csv')
     elif ext != '.csv':
         raise ValueError('UNSUPERVISED dataset FILE_LIST_PATH must either be a directory path or a .csv file name')
@@ -576,7 +575,7 @@ def update_config(config, args):
         raise ValueError('User specified UNSUPERVISED dataset FILE_LIST_PATH .csv file already exists. \
                          Please turn DO_PREPROCESS to False or delete existing UNSUPERVISED dataset FILE_LIST_PATH .csv file.')
 
-    # Establish the directory to hold pre-trained models from a given experiment inside 
+    # Establish the directory to hold pre-trained models from a given experiment inside
     # the configured log directory (runs/exp by default)
     config.MODEL.MODEL_DIR = os.path.join(config.LOG.PATH, config.TRAIN.DATA.EXP_DATA_NAME, config.MODEL.MODEL_DIR)
 
