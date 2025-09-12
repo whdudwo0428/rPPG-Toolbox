@@ -1,75 +1,123 @@
+# -*- coding: utf-8 -*-
+"""
+하위호환 보장용 통합 config:
+- 과거/현재 모듈이 요구하는 모든 심볼(이름)을 한 곳에서 정의
+- 환경변수로 쉽게 오버라이드
+- 멀티스케일 윈도우(HR/RR) + 추출/학습 공통 샘플레이트 + Mediapipe/장치 설정 포함
+"""
 
 import os
 from pathlib import Path
 
-# === 프로젝트 루트 ===
+# ──────────────────────────────────────────────────────────────────────────────
+# 경로/디렉터리
+# ──────────────────────────────────────────────────────────────────────────────
 PROJ_ROOT = str(Path(__file__).resolve().parents[1])
 
-# === 데이터 루트 (심볼릭 링크 기본). 환경변수 COHFACE_ROOT로 override 가능 ===
-DATA_ROOT = os.getenv(
-    "COHFACE_ROOT",
-    "/home/gongjae/PycharmProjects/rPPG-Toolbox/dataset/cohface"
-)
+# 데이터 루트 (환경변수 COHFACE_ROOT로 오버라이드)
+DATA_ROOT = os.getenv("COHFACE_ROOT", f"{PROJ_ROOT}/dataset/cohface")
 
-# === 출력 디렉토리 (프로젝트 루트 기준 상대경로) ===
+# 캐시/실행 결과
 CACHE_DIR = os.getenv("CACHE_DIR", "cohface_exp_reg/cache_cohface_feats")
 RUNS_DIR  = os.getenv("RUNS_DIR",  "cohface_exp_reg/runs")
 
-# === 신호 처리 공통 ===
-RESP_BAND = (0.08, 0.60)  # Hz (RR 5–36 bpm)
-HR_BAND   = (0.7, 3.0)    # Hz (HR 42–180 bpm; 필요시 사용)
-BP_ORDER  = 4             # Butterworth bandpass order
+# 자산(포즈 .task)
+ASSETS_DIR = os.getenv("ASSETS_DIR", os.path.join(PROJ_ROOT, "cohface_exp_reg", "assets"))
 
-FS_RESAMP = 256           # 기준 샘플레이트
-FS_EXTRACT = FS_RESAMP    # 호환 별칭
-FS_MODEL   = FS_RESAMP    # 모델 입력 샘플레이트
-
-LAG_MAX_S       = 0.50    # 전역 래그 최대 절대값(초)
-GLOBAL_LAG_CLIP = LAG_MAX_S  # 호환 별칭
-
-# === 윈도우 설정 ===
-# 단일값과의 호환을 유지하면서 멀티스케일을 기본 제공
-def _parse_float_list(env, default):
-    if env is None or env.strip() == "":
-        return list(default)
-    toks = [t.strip() for t in env.split(",")]
+# ──────────────────────────────────────────────────────────────────────────────
+# 샘플레이트(추출/모델)
+# ──────────────────────────────────────────────────────────────────────────────
+def _to_int(s, default):
     try:
-        vals = [float(t) for t in toks]
-        return [v for v in vals if v > 0]
+        return int(float(str(s)))
     except Exception:
-        return list(default)
+        return int(default)
 
-WIN_SEC    = float(os.getenv("WIN_SEC", "8.0"))          # 과거 호환
-STRIDE_SEC = float(os.getenv("STRIDE_SEC", "2.0"))       # 과거 호환
+FS_RESAMP  = _to_int(os.getenv("FS_RESAMP",  "256"), 256)   # 공통 리샘플
+FS_EXTRACT = _to_int(os.getenv("FS_EXTRACT", FS_RESAMP), FS_RESAMP)  # 추출 파이프라인
+FS_MODEL   = _to_int(os.getenv("FS_MODEL",   FS_RESAMP), FS_RESAMP)  # 모델 입력
 
-# 멀티스케일(기본: HR={8,16}s, RR={32,64}s). 쉼표로 오버라이드 가능: HR_WIN_LIST="6,10,14"
-HR_WIN_LIST = _parse_float_list(os.getenv("HR_WIN_LIST"), [8.0, 16.0])
-RR_WIN_LIST = _parse_float_list(os.getenv("RR_WIN_LIST"), [32.0, 64.0])
-# stride는 각 윈도우의 일정 비율을 기본 사용(25%), 환경변수로 고정값도 허용
-STRIDE_FRAC = float(os.getenv("STRIDE_FRAC", "0.25"))
-FIXED_STRIDE = os.getenv("FIXED_STRIDE", "").strip()
-FIXED_STRIDE = float(FIXED_STRIDE) if FIXED_STRIDE not in ("", None) else None
+# ──────────────────────────────────────────────────────────────────────────────
+# 대역/필터
+# ──────────────────────────────────────────────────────────────────────────────
+def _parse_pair(env_val, default_pair):
+    if env_val:
+        try:
+            a, b = [float(x) for x in env_val.split(",")]
+            return (a, b)
+        except Exception:
+            pass
+    return tuple(default_pair)
 
-# === 학습 하이퍼파라미터(기본값; run_train_*에서 동적 오버라이드 가능) ===
+RESP_BAND = _parse_pair(os.getenv("RESP_BAND"), (0.08, 0.60))  # RR (5–36 bpm)
+HR_BAND   = _parse_pair(os.getenv("HR_BAND"),   (0.7, 3.0))    # HR (42–180 bpm)
+BP_ORDER  = _to_int(os.getenv("BP_ORDER", "4"), 4)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 윈도우/스트라이드 (단일/멀티스케일 하위호환)
+# ──────────────────────────────────────────────────────────────────────────────
+def _parse_list(env_val, default_list):
+    if not env_val:
+        return list(default_list)
+    try:
+        return [float(x.strip()) for x in env_val.split(",") if x.strip() != ""]
+    except Exception:
+        return list(default_list)
+
+# (과거 단일 윈도우용 – 필요 시 여전히 사용 가능)
+WIN_SEC    = float(os.getenv("WIN_SEC", "8.0"))
+STRIDE_SEC = float(os.getenv("STRIDE_SEC", "2.0"))
+
+# (기본 멀티스케일)
+HR_WIN_LIST = _parse_list(os.getenv("HR_WIN_LIST"), [8.0, 16.0])
+RR_WIN_LIST = _parse_list(os.getenv("RR_WIN_LIST"), [32.0, 64.0])
+
+# stride 정책: FIXED_STRIDE가 존재하면 우선, 없으면 STRIDE_FRAC(윈도우 비율)
+STRIDE_FRAC  = float(os.getenv("STRIDE_FRAC", "0.25"))
+_fix = os.getenv("FIXED_STRIDE", "").strip()
+FIXED_STRIDE = float(_fix) if _fix not in ("", None) else None
+
+# 정렬(전역 래그) 한계
+LAG_MAX_S        = float(os.getenv("LAG_MAX_S", "0.50"))
+GLOBAL_LAG_CLIP  = LAG_MAX_S  # alias (하위호환)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 학습 기본값
+# ──────────────────────────────────────────────────────────────────────────────
+SPLIT_SEED = _to_int(os.getenv("SPLIT_SEED", "42"), 42)
+SEED       = _to_int(os.getenv("SEED", str(SPLIT_SEED)), SPLIT_SEED)
+
 LR       = float(os.getenv("LR", "1e-3"))
-EPOCHS   = int(os.getenv("EPOCHS", "50"))
-BATCH    = int(os.getenv("BATCH", "64"))
-PATIENCE = int(os.getenv("PATIENCE", "6"))
-SPLIT_SEED = 42
-SEED = SPLIT_SEED  # 호환 별칭
+EPOCHS   = _to_int(os.getenv("EPOCHS", "50"), 50)
+BATCH    = _to_int(os.getenv("BATCH", "64"), 64)
+PATIENCE = _to_int(os.getenv("PATIENCE", "6"), 6)
 
-# === Mediapipe Tasks 모델 경로/옵션 ===
-ASSETS_DIR      = os.path.join(PROJ_ROOT, "cohface_exp_reg", "assets")
-DEFAULT_TASK    = os.path.join(ASSETS_DIR, "pose_landmarker_full.task")
-POSE_TASK_PATH  = os.getenv("MP_TASK_PATH", DEFAULT_TASK)
+# ──────────────────────────────────────────────────────────────────────────────
+# Mediapipe / Tasks / 장치
+# ──────────────────────────────────────────────────────────────────────────────
+DEFAULT_TASK   = os.path.join(ASSETS_DIR, "pose_landmarker_full.task")
+MP_TASK_PATH   = os.getenv("MP_TASK_PATH", DEFAULT_TASK)
+POSE_TASK_PATH = MP_TASK_PATH   # pose_backend에서 이 이름을 사용할 수 있어 alias 제공
 
-MEDIAPIPE_USE_GPU    = os.getenv("MEDIAPIPE_USE_GPU", "1") not in ("0", "false", "False")
+MEDIAPIPE_USE_GPU    = os.getenv("MEDIAPIPE_USE_GPU", "1") not in ("0", "false", "False", "no", "NO")
 MEDIAPIPE_GL_BACKEND = os.getenv("MEDIAPIPE_GL_BACKEND", "egl")
 
-# === Torch / CUDA 장치 기본 ===
 try:
     import torch
-    CUDA_INDEX_DEFAULT = int(os.getenv("CUDA_INDEX", "0"))  # 3060 Ti를 0번으로
-    DEVICE = f"cuda:{CUDA_INDEX_DEFAULT}" if torch.cuda.is_available() else "cpu"
+    CUDA_INDEX = _to_int(os.getenv("CUDA_INDEX", "0"), 0)   # 3060 Ti = 0 가정
+    DEVICE     = f"cuda:{CUDA_INDEX}" if torch.cuda.is_available() else "cpu"
 except Exception:
-    DEVICE = "cpu"
+    CUDA_INDEX = 0
+    DEVICE     = "cpu"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 하위호환 보강(과거 코드가 다른 이름을 썼어도 안전)
+# ──────────────────────────────────────────────────────────────────────────────
+# 이미 동일 이름으로 위에 정의되어 있으므로 추가 alias는 필요치 않지만,
+# 혹시 import * 로 덮어쓰기를 겪는 경우를 대비해 존재 보장만 체크합니다.
+assert DATA_ROOT is not None
+assert CACHE_DIR is not None
+assert RUNS_DIR  is not None
+assert FS_RESAMP and FS_EXTRACT and FS_MODEL
+assert RESP_BAND and HR_BAND
+assert isinstance(HR_WIN_LIST, list) and isinstance(RR_WIN_LIST, list)

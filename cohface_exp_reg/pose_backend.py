@@ -1,9 +1,9 @@
 # pose_backend.py
 import os
-import numpy as np
+
 import cv2
 
-from config import (
+from .config import (
     POSE_TASK_PATH, MEDIAPIPE_USE_GPU, MEDIAPIPE_GL_BACKEND
 )
 

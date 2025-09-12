@@ -1,21 +1,20 @@
-
-import os, time, json, numpy as np
+# cohface_exp_reg/train.py
+import json
+import os
 from typing import Dict
+
+import numpy as np
 import torch
+from torch.cuda.amp import autocast, GradScaler
 from torch.utils.data import DataLoader
 
-from config import DEVICE, RUNS_DIR, LR, EPOCHS, BATCH, PATIENCE, RESP_BAND, FS_MODEL
-from utils import estimate_rr_bpm
+from .config import DEVICE, RUNS_DIR, LR, EPOCHS, PATIENCE
+
 
 def corrcoef_masked(x, y, mask, eps=1e-8):
-    """
-    x,y: [B,T], mask: [B,T] (1=valid)
-    """
     m = (mask > 0.5).float()
-    # 유효 길이
     L = torch.clamp(m.sum(dim=1, keepdim=True), min=1.0)
-    xm = (x * m)
-    ym = (y * m)
+    xm = (x * m); ym = (y * m)
     mean_x = xm.sum(dim=1, keepdim=True) / L
     mean_y = ym.sum(dim=1, keepdim=True) / L
     xc = (x - mean_x) * m
@@ -26,64 +25,54 @@ def corrcoef_masked(x, y, mask, eps=1e-8):
     return r.mean()
 
 def train_loop(model, train_loader: DataLoader, val_loader: DataLoader, tag: str):
-    out_dir = os.path.join(RUNS_DIR, tag)
-    os.makedirs(out_dir, exist_ok=True)
-
+    out_dir = os.path.join(RUNS_DIR, tag); os.makedirs(out_dir, exist_ok=True)
     model = model.to(DEVICE)
     torch.backends.cudnn.benchmark = (DEVICE.startswith("cuda"))
+    try: torch.set_float32_matmul_precision("high")
+    except Exception: pass
     opt = torch.optim.Adam(model.parameters(), lr=LR)
+    scaler = GradScaler(enabled=DEVICE.startswith("cuda"))
 
-    best = {"val_loss": 1e9, "epoch": 0, "corr_rr": 0.0}
-    patience = 0
-
+    best = {"val_loss": 1e9, "epoch": 0, "corr_rr": 0.0}; patience = 0
     for epoch in range(1, EPOCHS+1):
         model.train(); tr_loss = 0.0
         for X, Y, M, pad_mask, *_ in train_loader:
-            X = X.to(DEVICE).float()
-            Y = Y.to(DEVICE).float()
-            M = M.to(DEVICE).float()
-            P = pad_mask.to(DEVICE).float()  # [B,T,1]
+            X = X.to(DEVICE).float(); Y = Y.to(DEVICE).float()
+            M = M.to(DEVICE).float(); P = pad_mask.to(DEVICE).float()
 
-            pred = model(X)  # [B,T,2] 0:RR, 1:HR
-
-            # 패딩/헤드 마스크 결합
-            mask_rr = (M[:,:,0:1] * P)  # [B,T,1]
-            mask_hr = (M[:,:,1:2] * P)
-
-            # MSE (마스킹 평균)
-            def masked_mse(p, y, m):
-                num = ((p - y).square() * m).sum()
-                den = torch.clamp(m.sum(), min=1.0)
-                return num / den
-
-            mse_rr = masked_mse(pred[:,:,0:1], Y[:,:,0:1], mask_rr)
-            mse_hr = masked_mse(pred[:,:,1:2], Y[:,:,1:2], mask_hr)
-
-            # RR 상관(마스크)
-            corr_rr = corrcoef_masked(pred[:,:,0], Y[:,:,0], mask_rr.squeeze(-1))
-
-            # 최적화 목적
-            loss = mse_rr + 0.5*mse_hr + 0.2*(1.0 - corr_rr)
-            opt.zero_grad(); loss.backward(); opt.step()
-            tr_loss += float(loss.item())
-
-        tr_loss /= max(1, len(train_loader))
-
-        # validate
-        model.eval(); va_loss=0.0; corr_list=[]
-        with torch.no_grad():
-            for X,Y,M,pad_mask,*_ in val_loader:
-                X=X.to(DEVICE).float(); Y=Y.to(DEVICE).float()
-                M=M.to(DEVICE).float(); P=pad_mask.to(DEVICE).float()
-                pred = model(X)
+            with autocast(enabled=DEVICE.startswith("cuda")):
+                pred = model(X)  # [B,T,2]
                 mask_rr = (M[:,:,0:1] * P); mask_hr = (M[:,:,1:2] * P)
                 def masked_mse(p, y, m):
                     num = ((p - y).square() * m).sum()
                     den = torch.clamp(m.sum(), min=1.0)
                     return num / den
-                va_loss += (masked_mse(pred[:,:,0:1], Y[:,:,0:1], mask_rr) + 
-                            0.5*masked_mse(pred[:,:,1:2], Y[:,:,1:2], mask_hr)).item()
-                corr_list.append(float(corrcoef_masked(pred[:,:,0], Y[:,:,0], mask_rr.squeeze(-1)).item()))
+                mse_rr = masked_mse(pred[:,:,0:1], Y[:,:,0:1], mask_rr)
+                mse_hr = masked_mse(pred[:,:,1:2], Y[:,:,1:2], mask_hr)
+                corr_rr = corrcoef_masked(pred[:,:,0], Y[:,:,0], mask_rr.squeeze(-1))
+                loss = mse_rr + 0.5*mse_hr + 0.2*(1.0 - corr_rr)
+
+            opt.zero_grad(set_to_none=True)
+            scaler.scale(loss).backward()
+            scaler.step(opt); scaler.update()
+            tr_loss += float(loss.item())
+        tr_loss /= max(1, len(train_loader))
+
+        model.eval(); va_loss=0.0; corr_list=[]
+        with torch.no_grad():
+            for X,Y,M,pad_mask,*_ in val_loader:
+                X=X.to(DEVICE).float(); Y=Y.to(DEVICE).float()
+                M=M.to(DEVICE).float(); P=pad_mask.to(DEVICE).float()
+                with autocast(enabled=DEVICE.startswith("cuda")):
+                    pred = model(X)
+                    mask_rr = (M[:,:,0:1] * P); mask_hr = (M[:,:,1:2] * P)
+                    def masked_mse(p, y, m):
+                        num = ((p - y).square() * m).sum()
+                        den = torch.clamp(m.sum(), min=1.0)
+                        return num / den
+                    va_loss += (masked_mse(pred[:,:,0:1], Y[:,:,0:1], mask_rr) +
+                                0.5*masked_mse(pred[:,:,1:2], Y[:,:,1:2], mask_hr)).item()
+                    corr_list.append(float(corrcoef_masked(pred[:,:,0], Y[:,:,0], mask_rr.squeeze(-1)).item()))
         va_loss /= max(1,len(val_loader)); corrRR = float(np.mean(corr_list)) if corr_list else 0.0
         print(f"[{epoch:02d}] train_loss={tr_loss:.4f}  val_loss={va_loss:.4f}  val_corrRR={corrRR:.3f}")
 
@@ -98,7 +87,6 @@ def train_loop(model, train_loader: DataLoader, val_loader: DataLoader, tag: str
             patience += 1
             if patience >= PATIENCE:
                 print("Early stopping."); break
-
     return out_dir, best
 
 def evaluate(model, loader: DataLoader, fs_model: float) -> Dict[str,float]:
@@ -106,30 +94,24 @@ def evaluate(model, loader: DataLoader, fs_model: float) -> Dict[str,float]:
     all_corr_rr, all_rmse_rr = [], []
     all_corr_hr, all_rmse_hr = [], []
     rr_pred_bpm_list, rr_gt_bpm_list = [], []
-
     with torch.no_grad():
         for X,Y,M,pad_mask,*_ in loader:
             X=X.to(DEVICE).float(); Y=Y.to(DEVICE).float()
             M=M.to(DEVICE).float(); P=pad_mask.to(DEVICE).float()
-            pred=model(X)
-
+            with autocast(enabled=DEVICE.startswith("cuda")):
+                pred=model(X)
             mask_rr = (M[:,:,0:1] * P); mask_hr = (M[:,:,1:2] * P)
-
             def masked_rmse(p, y, m):
                 num = ((p - y).square() * m).sum()
                 den = torch.clamp(m.sum(), min=1.0)
                 return torch.sqrt(num/den)
-
-            # RR
             all_rmse_rr.append(masked_rmse(pred[:,:,0:1], Y[:,:,0:1], mask_rr).item())
-            # 상관(마스크)
             all_corr_rr.append(corrcoef_masked(pred[:,:,0], Y[:,:,0], mask_rr.squeeze(-1)).item())
-
-            # RR bpm (Welch) per-window (RR 유효 샘플만)
+            # RR bpm per-window
             B = X.shape[0]
             for b in range(B):
                 m = mask_rr[b,:,0] > 0.5
-                if m.sum() >= int(6*fs_model):  # 최소 6초
+                if m.sum() >= int(6*fs_model):
                     y_gt = Y[b,m,0].detach().cpu().numpy()
                     y_pr = pred[b,m,0].detach().cpu().numpy()
                     from utils import estimate_rr_bpm
@@ -138,24 +120,18 @@ def evaluate(model, loader: DataLoader, fs_model: float) -> Dict[str,float]:
                     if np.isfinite(gt_bpm) and np.isfinite(pr_bpm):
                         rr_gt_bpm_list.append(float(gt_bpm))
                         rr_pred_bpm_list.append(float(pr_bpm))
-
-            # HR (마스크)
+            # HR
             if (mask_hr.sum()>0).item():
                 all_rmse_hr.append(masked_rmse(pred[:,:,1:2], Y[:,:,1:2], mask_hr).item())
-                # 상관은 유효 시퀀스 합쳐서
                 m = mask_hr.squeeze(-1)>0.5
                 if m.any():
                     gt = Y[:,:,1][m].detach().cpu().numpy()
                     pr = pred[:,:,1][m].detach().cpu().numpy()
                     if gt.size>10 and np.all(np.isfinite(pr)) and np.all(np.isfinite(gt)):
                         all_corr_hr.append(float(np.corrcoef(pr,gt)[0,1]))
-
-    def safemean(v): 
+    def safemean(v):
         return float(np.mean(v)) if (len(v)>0 and np.all(np.isfinite(v))) else float("nan")
-
     rr_bpm_mae = safemean([abs(a-b) for a,b in zip(rr_pred_bpm_list, rr_gt_bpm_list)])
-    return dict(
-        corr_rr=safemean(all_corr_rr), rmse_rr=safemean(all_rmse_rr),
-        corr_hr=safemean(all_corr_hr), rmse_hr=safemean(all_rmse_hr),
-        rr_bpm_mae=rr_bpm_mae
-    )
+    return dict(corr_rr=safemean(all_corr_rr), rmse_rr=safemean(all_rmse_rr),
+                corr_hr=safemean(all_corr_hr), rmse_hr=safemean(all_rmse_hr),
+                rr_bpm_mae=rr_bpm_mae)

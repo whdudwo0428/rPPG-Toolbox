@@ -1,9 +1,12 @@
 # run_extract_all.py
-import os, argparse, json
+import argparse
+import os
+
 from tqdm import tqdm
 
-from config import DATA_ROOT, CACHE_DIR, FS_RESAMP, RESP_BAND
 import preprocess  # 내부 모듈
+from .config import DATA_ROOT, CACHE_DIR, FS_RESAMP, RESP_BAND
+
 
 def parse_range(s):
     """ '1-5,7,10-12' -> [1,2,3,4,5,7,10,11,12] """

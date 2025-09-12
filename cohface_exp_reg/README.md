@@ -83,6 +83,9 @@ export HR_WIN_LIST="8,16"      # HR 윈도우(초)
 export RR_WIN_LIST="32,64"     # RR 윈도우(초)
 export STRIDE_FRAC="0.25"      # 각 윈도우의 25%로 슬라이딩
 # export FIXED_STRIDE="2.0"    # 고정 stride(초)로 쓰고 싶을 때
+
+# 메모리 단편화 완화
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 ```
 
 > 참고: 단일 윈도우 사용이 필요하면 `WIN_SEC`/`STRIDE_SEC` 인자나 환경변수를 그대로 사용할 수 있습니다(하위호환).
@@ -124,9 +127,10 @@ python cohface_exp_reg/run_extract_all.py \
 ```bash
 python cohface_exp_reg/run_train_lstm.py \
   --cache cohface_exp_reg/cache_cohface_feats \
-  --epochs 50 --batch_size 64 --lr 1e-3 --cuda 0 \
+  --epochs 50 --lr 1e-3 --cuda 0 \
   --hidden 128 --layers 2 --bidir 1 --dropout 0.1 \
-  --hr_wins 8,16 --rr_wins 32,64 --stride_frac 0.25
+  --hr_wins 8,16 --rr_wins 32,64 --stride_frac 0.25 \
+  --bucket_bs "16384:2,8192:4,4096:16,2048:32"
 ```
 
 ### GRU

@@ -1,9 +1,11 @@
-import os, math, random, time
-from typing import Dict, Tuple, List, Optional
-import numpy as np
-from scipy.signal import butter, sosfiltfilt, welch
+import random
+from typing import List
 
-from config import FS_EXTRACT, FS_MODEL, RESP_BAND, HR_BAND, BP_ORDER, GLOBAL_LAG_CLIP, SEED
+import numpy as np
+from scipy.signal import sosfiltfilt, welch
+
+from .config import FS_EXTRACT, RESP_BAND, HR_BAND, BP_ORDER, GLOBAL_LAG_CLIP, SEED
+
 
 def set_seed(seed=SEED):
     random.seed(seed); np.random.seed(seed)
