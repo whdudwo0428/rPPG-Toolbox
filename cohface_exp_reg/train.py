@@ -1,146 +1,123 @@
-# cohface_exp_reg/train.py
-import json
-import os
-from typing import Dict
-
+# -*- coding: utf-8 -*-
+import os, json, math, time
 import numpy as np
 import torch
-from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
+from torch.amp import autocast, GradScaler
 
-from .config import DEVICE, RUNS_DIR, LR, EPOCHS, PATIENCE
-from .utils import estimate_rr_bpm
+from .config import (DEVICE, RUNS_DIR, LR, EPOCHS, PATIENCE, FS_MODEL,
+                     PHASE_LAMBDA, PHASE_BETA, LAG_MAX_S, SNR_HIT_BPM)
+from .utils import corr_soft_bestlag, welch_psd_rr_bpm
 
-def corrcoef_masked(x, y, mask, eps=1e-8):
-    m = (mask > 0.5).float()
-    L = torch.clamp(m.sum(dim=1, keepdim=True), min=1.0)
-    xm = (x * m); ym = (y * m)
-    mean_x = xm.sum(dim=1, keepdim=True) / L
-    mean_y = ym.sum(dim=1, keepdim=True) / L
-    xc = (x - mean_x) * m
-    yc = (y - mean_y) * m
-    num = (xc * yc).sum(dim=1)
-    den = torch.sqrt((xc.square().sum(dim=1) + eps) * (yc.square().sum(dim=1) + eps))
-    r = num / den
-    return r.mean()
+def pad_collate(batch):
+    # batch: list of dicts produced in make_batch (see train_loop)
+    # we expect already sliced tensors in same length per batch
+    raise NotImplementedError("pad_collate not used in V1 (we bucket by length).")
 
-def train_loop(model, train_loader: DataLoader, val_loader: DataLoader, tag: str):
-    out_dir = os.path.join(RUNS_DIR, tag); os.makedirs(out_dir, exist_ok=True)
-    model = model.to(DEVICE)
-    torch.backends.cudnn.benchmark = (DEVICE.startswith("cuda"))
-    try: torch.set_float32_matmul_precision("high")
-    except Exception: pass
-    opt = torch.optim.Adam(model.parameters(), lr=LR)
-    scaler = GradScaler("cuda", enabled=DEVICE.startswith("cuda"))
+def make_batch(dataset, indices):
+    # indices: list of (session_idx, a, b, T)
+    Xs, Ys = [], []
+    for (i, a, b, T) in indices:
+        x = torch.tensor(dataset.X[i][a:b], dtype=torch.float32)  # [T,16]
+        y = torch.tensor(dataset.Y[i][a:b], dtype=torch.float32)  # [T,1]
+        # 힌트 채널(상수)을 윈도우 단위로 채움: snr/corr
+        # 간단 구현: 0으로 두되, 이후 개선 시 여기서 계산하여 채움
+        Xs.append(x); Ys.append(y)
+    X = torch.stack(Xs, dim=0)  # [B,T,C] (같은 길이만 모아 배치)
+    Y = torch.stack(Ys, dim=0)  # [B,T,1]
+    return X, Y
 
-    best = {"val_loss": 1e9, "epoch": 0, "corr_rr": 0.0}; patience = 0
-    for epoch in range(1, EPOCHS+1):
-        model.train(); tr_loss = 0.0
-        for X, Y, M, pad_mask, *_ in train_loader:
-            X = X.to(DEVICE).float(); Y = Y.to(DEVICE).float()
-            M = M.to(DEVICE).float(); P = pad_mask.to(DEVICE).float()
+def evaluate(model, loader, fs=FS_MODEL, device=DEVICE):
+    model.eval()
+    mse_list, mae_list, corr_list, corr_bl_list, bpm_mae_list, hit_list = [], [], [], [], [], []
+    with torch.no_grad():
+        for X, Y in loader:
+            X = X.to(device); Y = Y.to(device)
+            pred = model(X)  # [B,T,1]
+            err = pred - Y
+            mse = (err**2).mean(dim=[1,2]).cpu().numpy()
+            mae = err.abs().mean(dim=[1,2]).cpu().numpy()
+            # numpy 지표
+            for b in range(pred.size(0)):
+                pb = pred[b,:,0].detach().cpu().numpy()
+                gb = Y[b,:,0].detach().cpu().numpy()
+                c  = np.corrcoef(pb, gb)[0,1] if len(pb)>3 else 0.0
+                c2, _lag = corr_soft_bestlag(pb, gb, fs=fs, lag_s=LAG_MAX_S, beta=PHASE_BETA)
+                bpm_p = welch_psd_rr_bpm(pb, fs); bpm_g = welch_psd_rr_bpm(gb, fs)
+                bpm_mae = abs(bpm_p - bpm_g) if not (np.isnan(bpm_p) or np.isnan(bpm_g)) else np.nan
+                hit = float(abs(bpm_p-bpm_g) <= SNR_HIT_BPM) if not (np.isnan(bpm_p) or np.isnan(bpm_g)) else 0.0
+                corr_list.append(c if not np.isnan(c) else 0.0)
+                corr_bl_list.append(c2)
+                bpm_mae_list.append(bpm_mae if not np.isnan(bpm_mae) else 0.0)
+                hit_list.append(hit)
+            mse_list.extend(mse.tolist()); mae_list.extend(mae.tolist())
+    out = {
+        "mse": float(np.mean(mse_list)),
+        "mae": float(np.mean(mae_list)),
+        "corr": float(np.mean(corr_list)),
+        "corr_bestlag": float(np.mean(corr_bl_list)),
+        "rr_bpm_mae": float(np.mean(bpm_mae_list)),
+        f"hit@±{SNR_HIT_BPM}bpm": float(np.mean(hit_list)),
+    }
+    return out
 
-            with autocast("cuda", enabled=DEVICE.startswith("cuda")):
-                pred = model(X)  # [B,T,2]
-                mask_rr = (M[:,:,0:1] * P); mask_hr = (M[:,:,1:2] * P)
-                def masked_mse(p, y, m):
-                    num = ((p - y).square() * m).sum()
-                    den = torch.clamp(m.sum(), min=1.0)
-                    return num / den
-                mse_rr = masked_mse(pred[:,:,0:1], Y[:,:,0:1], mask_rr)
-                mse_hr = masked_mse(pred[:,:,1:2], Y[:,:,1:2], mask_hr)
-                corr_rr = corrcoef_masked(pred[:,:,0], Y[:,:,0], mask_rr.squeeze(-1))
-                loss = mse_rr + 0.5*mse_hr + 0.2*(1.0 - corr_rr)
+def train_loop(model, optimizer, train_loaders, val_loaders, epochs=EPOCHS, device=DEVICE):
+    scaler = GradScaler()
+    best_val = None
+    best_state = None
+    patience = 0
 
-            opt.zero_grad(set_to_none=True)
-            scaler.scale(loss).backward()
-            scaler.step(opt); scaler.update()
-            tr_loss += float(loss.item())
-        tr_loss /= max(1, len(train_loader))
-
-        model.eval(); va_loss=0.0; corr_list=[]
-        with torch.no_grad():
-            for X,Y,M,pad_mask,*_ in val_loader:
-                X=X.to(DEVICE).float(); Y=Y.to(DEVICE).float()
-                M=M.to(DEVICE).float(); P=pad_mask.to(DEVICE).float()
-                with autocast("cuda", enabled=DEVICE.startswith("cuda")):
+    for ep in range(1, epochs+1):
+        model.train()
+        ep_loss = []
+        for loader in train_loaders:
+            for X, Y in loader:
+                X = X.to(device); Y = Y.to(device)
+                optimizer.zero_grad(set_to_none=True)
+                with autocast(device_type='cuda', enabled=('cuda' in device)):
                     pred = model(X)
-                    mask_rr = (M[:,:,0:1] * P); mask_hr = (M[:,:,1:2] * P)
-                    def masked_mse(p, y, m):
-                        num = ((p - y).square() * m).sum()
-                        den = torch.clamp(m.sum(), min=1.0)
-                        return num / den
-                    va_loss += (masked_mse(pred[:,:,0:1], Y[:,:,0:1], mask_rr) +
-                                0.5*masked_mse(pred[:,:,1:2], Y[:,:,1:2], mask_hr)).item()
-                    corr_list.append(float(corrcoef_masked(pred[:,:,0], Y[:,:,0], mask_rr.squeeze(-1)).item()))
-        va_loss /= max(1,len(val_loader)); corrRR = float(np.mean(corr_list)) if corr_list else 0.0
-        print(f"[{epoch:02d}] train_loss={tr_loss:.4f}  val_loss={va_loss:.4f}  val_corrRR={corrRR:.3f}")
+                    mse = torch.mean((pred - Y)**2)
+                    # corr@soft-best-lag (numpy ref → torch로 대체 가능하나 ep 마다 배치 샘플링으로 근사)
+                    # 여기서는 간소화: 배치 평균으로 numpy 함수 호출
+                    loss_phase = 0.0
+                    for b in range(pred.size(0)):
+                        pb = pred[b,:,0].detach().cpu().numpy()
+                        gb = Y[b,:,0].detach().cpu().numpy()
+                        c2, _ = corr_soft_bestlag(pb, gb, fs=FS_MODEL, lag_s=LAG_MAX_S, beta=PHASE_BETA)
+                        loss_phase += (1.0 - c2)
+                    loss_phase = loss_phase / max(1, pred.size(0))
+                    loss = mse + PHASE_LAMBDA * loss_phase
+                scaler.scale(torch.tensor(loss, dtype=torch.float32, device=device)).backward()
+                scaler.step(optimizer)
+                scaler.update()
+                ep_loss.append(float(mse.detach().cpu().item()))
 
-        crit = va_loss + (1.0 - corrRR)*0.1
-        if crit < best["val_loss"]:
-            best.update(val_loss=crit, corr_rr=corrRR, epoch=epoch)
-            torch.save(model.state_dict(), os.path.join(out_dir, "best_model.pt"))
-            with open(os.path.join(out_dir, "best.json"), "w") as f:
-                json.dump(best, f, indent=2, ensure_ascii=False)
+        # 평가
+        val_metrics = {}
+        for k, vloader in val_loaders.items():
+            val_metrics[k] = evaluate(model, vloader, device=device)
+
+        # 선택 기준: corr_bestlag 최대
+        key = "corr_bestlag"
+        cur = val_metrics.get("val", {}).get(key, -1e9)
+        if (best_val is None) or (cur > best_val):
+            best_val = cur
+            best_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
             patience = 0
         else:
             patience += 1
-            if patience >= PATIENCE:
-                print("Early stopping."); break
-    return out_dir, best
 
-def evaluate(model, loader: DataLoader, fs_model: float) -> Dict[str,float]:
-    model = model.to(DEVICE).eval()
-    all_corr_rr, all_rmse_rr, all_mae_rr = [], [], []
-    all_corr_hr, all_rmse_hr, all_mae_hr = [], [], []
-    rr_pred_bpm_list, rr_gt_bpm_list = [], []
-    with torch.no_grad():
-        for X,Y,M,pad_mask,*_ in loader:
-            X=X.to(DEVICE).float(); Y=Y.to(DEVICE).float()
-            M=M.to(DEVICE).float(); P=pad_mask.to(DEVICE).float()
-            with autocast("cuda", enabled=DEVICE.startswith("cuda")):
-                pred=model(X)
-            mask_rr = (M[:,:,0:1] * P); mask_hr = (M[:,:,1:2] * P)
-            def masked_rmse(p, y, m):
-                num = ((p - y).square() * m).sum()
-                den = torch.clamp(m.sum(), min=1.0)
-                return torch.sqrt(num/den)
+        print(f"[epoch {ep:03d}] train_mse={np.mean(ep_loss):.4f} | val={val_metrics.get('val',{})}")
+        if patience >= PATIENCE:
+            print("[early stop]")
+            break
+    # 복원
+    if best_state is not None:
+        model.load_state_dict(best_state)
+    return model
 
-            def masked_mae(p, y, m):
-                num = (torch.abs(p - y) * m).sum()
-                den = torch.clamp(m.sum(), min=1.0)
-                return num / den
-            all_rmse_rr.append(masked_rmse(pred[:, :, 0:1], Y[:, :, 0:1], mask_rr).item())
-            all_mae_rr.append(masked_mae(pred[:, :, 0:1], Y[:, :, 0:1], mask_rr).item())
-            all_corr_rr.append(corrcoef_masked(pred[:,:,0], Y[:,:,0], mask_rr.squeeze(-1)).item())
-            # RR bpm per-window
-            B = X.shape[0]
-            for b in range(B):
-                m = mask_rr[b,:,0] > 0.5
-                if m.sum() >= int(6*fs_model):
-                    y_gt = Y[b,m,0].detach().cpu().numpy()
-                    y_pr = pred[b,m,0].detach().cpu().numpy()
-                    gt_bpm = estimate_rr_bpm(y_gt, fs_model)
-                    pr_bpm = estimate_rr_bpm(y_pr, fs_model)
-                    if np.isfinite(gt_bpm) and np.isfinite(pr_bpm):
-                        rr_gt_bpm_list.append(float(gt_bpm))
-                        rr_pred_bpm_list.append(float(pr_bpm))
-            # HR
-            if (mask_hr.sum()>0).item():
-                all_rmse_hr.append(masked_rmse(pred[:, :, 1:2], Y[:, :, 1:2], mask_hr).item())
-                all_mae_hr.append(masked_mae(pred[:, :, 1:2], Y[:, :, 1:2], mask_hr).item())
-                m = mask_hr.squeeze(-1)>0.5
-                if m.any():
-                    gt = Y[:,:,1][m].detach().cpu().numpy()
-                    pr = pred[:,:,1][m].detach().cpu().numpy()
-                    if gt.size>10 and np.all(np.isfinite(pr)) and np.all(np.isfinite(gt)):
-                        all_corr_hr.append(float(np.corrcoef(pr,gt)[0,1]))
-    def safemean(v):
-        return float(np.mean(v)) if (len(v)>0 and np.all(np.isfinite(v))) else float("nan")
-
-    rr_bpm_mae = safemean([abs(a - b) for a, b in zip(rr_pred_bpm_list, rr_gt_bpm_list)])
-
-    return dict(corr_rr=safemean(all_corr_rr), rmse_rr = safemean(all_rmse_rr), mae_rr = safemean(all_mae_rr),
-                corr_hr = safemean(all_corr_hr), rmse_hr = safemean(all_rmse_hr), mae_hr = safemean(all_mae_hr),
-                rr_bpm_mae = rr_bpm_mae
-                )
+def save_run(run_dir, model, metrics):
+    os.makedirs(run_dir, exist_ok=True)
+    torch.save(model.state_dict(), os.path.join(run_dir, "best_model.pt"))
+    with open(os.path.join(run_dir, "metrics.json"), "w") as f:
+        json.dump(metrics, f, indent=2, ensure_ascii=False)

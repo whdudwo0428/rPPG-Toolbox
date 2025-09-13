@@ -1,167 +1,119 @@
-# pose_backend.py
-import os
+# -*- coding: utf-8 -*-
+"""
+Mediapipe Pose → dW, dY, dD_perp 추출
+- Tasks .task 가 있으면 GPU, 없으면 solutions CPU 폴백
+"""
+import os, cv2, numpy as np
+from typing import Tuple, Optional
+from .config import MP_TASK_PATH, MEDIAPIPE_USE_GPU
 
-import cv2
-import math
-import numpy as np
-
-from .config import (
-    POSE_TASK_PATH, MEDIAPIPE_USE_GPU, MEDIAPIPE_GL_BACKEND
-)
-
-# 환경 세팅
-os.environ.setdefault("MEDIAPIPE_GL_BACKEND", MEDIAPIPE_GL_BACKEND)
-if MEDIAPIPE_USE_GPU:
-    os.environ.setdefault("MEDIAPIPE_USE_GPU", "1")
-
-HAS_TASK_FILE = os.path.isfile(POSE_TASK_PATH)
-
-# Mediapipe imports (Tasks는 실패 가능, solutions는 항상 가능)
-import mediapipe as mp
-from mediapipe import solutions as mp_solutions
+# 지연 로드 (미설치 환경 고려)
 try:
-    from mediapipe.tasks import python as mp_tasks
-    from mediapipe.tasks.python import vision as mp_vision
-    HAS_TASKS = True
+    import mediapipe as mp
 except Exception:
-    HAS_TASKS = False
+    mp = None
 
-class PoseBackend:
-    """
-    통합 백엔드:
-      - 가능하면 Tasks(pose_landmarker_full.task) 사용
-      - 실패/모델없음이면 solutions.pose(CPU)로 안전 폴백
-    .process(frame_bgr) -> dict(keys: L, R, N) with (x,y,vis) or None
-    """
-    def __init__(self):
-        self.mode = None
-        self.ctx  = None
-        # 1) Tasks 시도
-        if HAS_TASKS and HAS_TASK_FILE:
-            try:
-                base_opts = mp_tasks.BaseOptions(model_asset_path=POSE_TASK_PATH)
-                running_mode = mp_tasks.vision.RunningMode.VIDEO  # timestamp 필요
-                opts = mp_vision.PoseLandmarkerOptions(
-                    base_options=base_opts,
-                    running_mode=running_mode,
-                    num_poses=1,
-                )
-                self.ctx = mp_vision.PoseLandmarker.create_from_options(opts)
-                self.mode = "tasks"
-                print(f"[pose] Tasks backend 사용: {POSE_TASK_PATH}")
-            except Exception as e:
-                print(f"[pose] GPU Tasks 실패 → solutions.pose 폴백: {e}")
+# landmark indices (BlazePose Full)
+LM = {
+    "NOSE": 0,
+    "LEFT_SHOULDER": 11,
+    "RIGHT_SHOULDER": 12,
+}
 
-        # 2) solutions.pose
-        if self.ctx is None:
-            self.ctx = mp_solutions.pose.Pose(
-                static_image_mode=False,
-                model_complexity=1,
-                enable_segmentation=False,
-                min_detection_confidence=0.5,
-                min_tracking_confidence=0.5
-            )
-            self.mode = "solutions"
-            print("[pose] solutions.pose (CPU) 사용")
+def _landmark_xy(lm, W, H):
+    return np.array([lm.x*W, lm.y*H], dtype=np.float32)
 
-        self._ts_ms = 0  # tasks용 누적 timestamp
+def _shoulder_axis_slow(SL_hist, SR_hist, fc=0.05, fs=30.0):
+    # 어깨선 각도의 저주파 성분 (EMA에 근접한 1차 IIR로 근사)
+    if len(SL_hist) < 3: return 0.0
+    v = (SR_hist - SL_hist)  # [N,2]
+    ang = np.arctan2(v[:,1], v[:,0])
+    # unwrap
+    ang = np.unwrap(ang)
+    # 간단 이동평균
+    k = max(1, int(round(fs/(2*np.pi*fc))))
+    if k>1:
+        ang_f = np.convolve(ang, np.ones(k)/k, mode='same')
+    else:
+        ang_f = ang
+    return ang_f[-1]
 
-    def close(self):
-        try:
-            if self.mode == "solutions" and self.ctx:
-                self.ctx.close()
-        except Exception:
-            pass
-
-    def __del__(self):
-        self.close()
-
-    @staticmethod
-    def _pick(lms, W, H):
-        # mediapipe 인덱스
-        PoseLandmark = mp.solutions.pose.PoseLandmark
-        ids = {
-            "L": PoseLandmark.LEFT_SHOULDER,
-            "R": PoseLandmark.RIGHT_SHOULDER,
-            "N": PoseLandmark.NOSE
-        }
-        out = {}
-        for k, idx in ids.items():
-            pt = lms[idx]
-            x = float(pt.x * W); y = float(pt.y * H)
-            vis = float(getattr(pt, "visibility", 1.0))
-            out[k] = (x, y, vis)
-        return out
-
-    def process(self, frame_bgr):
-        H, W = frame_bgr.shape[:2]
-        if self.mode == "tasks":
-            # Tasks API는 RGB + timestamp(ms)
-            self._ts_ms += 33.3  # ~30fps 가정(실제값은 상관없고 증가만 하면 됨)
-            rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-            mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-            res = self.ctx.detect_for_video(mp_img, int(self._ts_ms))
-            if not res.pose_landmarks:
-                return None
-            lms = res.pose_landmarks[0]
-            return self._pick(lms, W, H)
-
-        # solutions
-        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        res = self.ctx.process(rgb)
-        if not res.pose_landmarks:
-            return None
-        lms = res.pose_landmarks.landmark
-        return self._pick(lms, W, H)
-
-def make_pose_landmarker(use_gpu=True):
-    # env는 파일 상단에서 이미 세팅됨
-    bk = PoseBackend()
-    return bk.mode, bk
-
-def extract_displacements(video_path, pose_backend, pose_handle):
+def extract_displacements(video_path: str):
+    if mp is None:
+        raise RuntimeError("mediapipe is not installed.")
     cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened(): return None, None, None, None
-    fps = cap.get(cv2.CAP_PROP_FPS); fps = fps if fps and fps>0 else 30.0
-    ts, dW, dY, dD = [], [], [], []
-    t = 0.0; dt = 1.0/float(fps)
+    if not cap.isOpened():
+        raise FileNotFoundError(video_path)
 
-    def dist(a,b): return math.hypot(a[0]-b[0], a[1]-b[1])
+    use_tasks = (os.path.exists(MP_TASK_PATH) and os.getenv("MEDIAPIPE_USE_GPU","1")=="1")
 
+    if use_tasks:
+        base = mp.tasks
+        VisionRunningMode = base.vision.RunningMode
+        pose_opts = base.vision.PoseLandmarkerOptions(
+            base_options=base.BaseOptions(model_asset_path=MP_TASK_PATH),
+            running_mode=VisionRunningMode.VIDEO,
+            output_segmentation_masks=False)
+        detector = base.vision.PoseLandmarker.create_from_options(pose_opts)
+    else:
+        solutions = mp.solutions
+        detector = solutions.pose.Pose()
+
+    ts, dW, dY, dD, dD_perp = [], [], [], [], []
+    SL_hist, SR_hist = [], []
+
+    t = 0.0; dt = 1.0/30.0  # fallback fps
     while True:
         ok, frame = cap.read()
         if not ok: break
-        out = pose_handle.process(frame)
-        if out is not None and all(k in out for k in ("L","R","N")):
-            L, R, N = out["L"], out["R"], out["N"]
-            # 좌표: (x,y,vis) — y는 화면 아래가 +이므로 이후 bandpass로 DC 제거/정규화됨
-            mid = ((L[0] + R[0]) / 2.0, (L[1] + R[1]) / 2.0)
+        H, W = frame.shape[:2]
+        if use_tasks:
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+            det = detector.detect_for_video(mp_image, int(t*1000))
+            if not det.pose_landmarks: 
+                t += dt; continue
+            lms = det.pose_landmarks[0]
+            def pick(i):
+                pt = lms[i]
+                return np.array([pt.x*W, pt.y*H], dtype=np.float32)
+        else:
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            det = detector.process(rgb)
+            if not det.pose_landmarks:
+                t += dt; continue
+            lms = det.pose_landmarks.landmark
+            def pick(i):
+                pt = lms[i]
+                return np.array([pt.x*W, pt.y*H], dtype=np.float32)
 
-            # --- 어깨축 정렬(roll 보정): 어깨 선분을 x축에 수평 정렬 ---
-            dx, dy = (R[0] - L[0]), (R[1] - L[1])
-            ang = math.atan2(dy, dx)  # roll 각
-            ca, sa = math.cos(-ang), math.sin(-ang)
+        nose = pick(LM["NOSE"])
+        SL   = pick(LM["LEFT_SHOULDER"])
+        SR   = pick(LM["RIGHT_SHOULDER"])
 
-            def rot_about_mid(pt):
-                x, y = pt[0] - mid[0], pt[1] - mid[1]
-                xr = ca * x - sa * y
-                yr = sa * x + ca * y
-                return (mid[0] + xr, mid[1] + yr)  # 절대좌표로 복원(전역 이동 보존)
+        # 기본 측정
+        mid = 0.5*(SL+SR)
+        width = np.linalg.norm(SR-SL)
+        dW.append(width)
+        dY.append(mid[1])  # 어깨중점 y
+        # 코→어깨선 수선 거리 부호: 오른쪽을 +x라 가정, 상단이 -y
+        # 표준화 전 원본 dD(직교거리)
+        # (부호는 카메라 좌표 기준, 여기서는 일관성 유지만)
+        v = SR - SL
+        n = np.array([-v[1], v[0]], dtype=np.float32)  # 어깨선에 수직
+        n = n / (np.linalg.norm(n)+1e-6)
+        d = np.dot((nose - mid), n)
+        dD.append(d)
 
-            Lr, Rr, Nr = rot_about_mid(L), rot_about_mid(R), rot_about_mid(N)
+        # 느린 축 기반 수선성분 dD_perp
+        SL_hist.append(SL); SR_hist.append(SR)
+        ang_slow = _shoulder_axis_slow(np.array(SL_hist), np.array(SR_hist), fc=0.05, fs=30.0)
+        v_slow = np.array([-np.sin(ang_slow), np.cos(ang_slow)], dtype=np.float32)
+        d_perp = np.dot((nose - mid), v_slow)
+        dD_perp.append(d_perp)
 
-            # --- 새 정의 ---
-            W = math.hypot(Rr[0] - Lr[0], Rr[1] - Lr[1])  # dW = 어깨폭(회전 불변)
-            shoulder_y = 0.5 * (Lr[1] + Rr[1])  # 어깨중점의 수직 위치(전역 y 보존)
-            Y = shoulder_y  # dY = 어깨 수직 변위
-            D = (Nr[1] - shoulder_y)  # dD = 코–어깨중점의 '수직' 차(부호 포함)
-
-            ts.append(t);
-            dW.append(W);
-            dY.append(Y);
-            dD.append(D)
+        ts.append(t)
         t += dt
-    cap.release()
 
-    if len(ts) < 3: return None, None, None, None
-    return np.array(ts, np.float32), np.array(dW, np.float32), np.array(dY, np.float32), np.array(dD, np.float32)
+    cap.release()
+    return np.array(ts), np.array(dW), np.array(dY), np.array(dD), np.array(dD_perp)
