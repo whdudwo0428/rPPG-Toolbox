@@ -91,8 +91,8 @@ def train_loop(model, train_loader: DataLoader, val_loader: DataLoader, tag: str
 
 def evaluate(model, loader: DataLoader, fs_model: float) -> Dict[str,float]:
     model = model.to(DEVICE).eval()
-    all_corr_rr, all_rmse_rr = [], []
-    all_corr_hr, all_rmse_hr = [], []
+    all_corr_rr, all_rmse_rr, all_mae_rr = [], [], []
+    all_corr_hr, all_rmse_hr, all_mae_hr = [], [], []
     rr_pred_bpm_list, rr_gt_bpm_list = [], []
     with torch.no_grad():
         for X,Y,M,pad_mask,*_ in loader:
@@ -105,7 +105,13 @@ def evaluate(model, loader: DataLoader, fs_model: float) -> Dict[str,float]:
                 num = ((p - y).square() * m).sum()
                 den = torch.clamp(m.sum(), min=1.0)
                 return torch.sqrt(num/den)
-            all_rmse_rr.append(masked_rmse(pred[:,:,0:1], Y[:,:,0:1], mask_rr).item())
+
+            def masked_mae(p, y, m):
+                num = (torch.abs(p - y) * m).sum()
+                den = torch.clamp(m.sum(), min=1.0)
+                return num / den
+            all_rmse_rr.append(masked_rmse(pred[:, :, 0:1], Y[:, :, 0:1], mask_rr).item())
+            all_mae_rr.append(masked_mae(pred[:, :, 0:1], Y[:, :, 0:1], mask_rr).item())
             all_corr_rr.append(corrcoef_masked(pred[:,:,0], Y[:,:,0], mask_rr.squeeze(-1)).item())
             # RR bpm per-window
             B = X.shape[0]
@@ -121,7 +127,8 @@ def evaluate(model, loader: DataLoader, fs_model: float) -> Dict[str,float]:
                         rr_pred_bpm_list.append(float(pr_bpm))
             # HR
             if (mask_hr.sum()>0).item():
-                all_rmse_hr.append(masked_rmse(pred[:,:,1:2], Y[:,:,1:2], mask_hr).item())
+                all_rmse_hr.append(masked_rmse(pred[:, :, 1:2], Y[:, :, 1:2], mask_hr).item())
+                all_mae_hr.append(masked_mae(pred[:, :, 1:2], Y[:, :, 1:2], mask_hr).item())
                 m = mask_hr.squeeze(-1)>0.5
                 if m.any():
                     gt = Y[:,:,1][m].detach().cpu().numpy()
@@ -130,7 +137,10 @@ def evaluate(model, loader: DataLoader, fs_model: float) -> Dict[str,float]:
                         all_corr_hr.append(float(np.corrcoef(pr,gt)[0,1]))
     def safemean(v):
         return float(np.mean(v)) if (len(v)>0 and np.all(np.isfinite(v))) else float("nan")
-    rr_bpm_mae = safemean([abs(a-b) for a,b in zip(rr_pred_bpm_list, rr_gt_bpm_list)])
-    return dict(corr_rr=safemean(all_corr_rr), rmse_rr=safemean(all_rmse_rr),
-                corr_hr=safemean(all_corr_hr), rmse_hr=safemean(all_rmse_hr),
-                rr_bpm_mae=rr_bpm_mae)
+
+    rr_bpm_mae = safemean([abs(a - b) for a, b in zip(rr_pred_bpm_list, rr_gt_bpm_list)])
+
+    return dict(corr_rr=safemean(all_corr_rr), rmse_rr = safemean(all_rmse_rr), mae_rr = safemean(all_mae_rr),
+                corr_hr = safemean(all_corr_hr), rmse_hr = safemean(all_rmse_hr), mae_hr = safemean(all_mae_hr),
+                rr_bpm_mae = rr_bpm_mae
+                )

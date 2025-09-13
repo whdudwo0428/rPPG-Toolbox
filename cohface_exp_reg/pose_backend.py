@@ -2,6 +2,8 @@
 import os
 
 import cv2
+import math
+import numpy as np
 
 from .config import (
     POSE_TASK_PATH, MEDIAPIPE_USE_GPU, MEDIAPIPE_GL_BACKEND
@@ -118,7 +120,6 @@ def make_pose_landmarker(use_gpu=True):
     return bk.mode, bk
 
 def extract_displacements(video_path, pose_backend, pose_handle):
-    import cv2, numpy as np, math
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened(): return None, None, None, None
     fps = cap.get(cv2.CAP_PROP_FPS); fps = fps if fps and fps>0 else 30.0
@@ -134,11 +135,31 @@ def extract_displacements(video_path, pose_backend, pose_handle):
         if out is not None and all(k in out for k in ("L","R","N")):
             L, R, N = out["L"], out["R"], out["N"]
             # 좌표: (x,y,vis) — y는 화면 아래가 +이므로 이후 bandpass로 DC 제거/정규화됨
-            W = dist(L, R)                           # 어깨 간 거리(폭) → dW
-            Y = N[1]                                 # 코의 수직 좌표 → dY
-            mid = ((L[0]+R[0])/2.0, (L[1]+R[1])/2.0)
-            D = dist(N, mid)                         # 코-어깨중점 거리 → dD
-            ts.append(t); dW.append(W); dY.append(Y); dD.append(D)
+            mid = ((L[0] + R[0]) / 2.0, (L[1] + R[1]) / 2.0)
+
+            # --- 어깨축 정렬(roll 보정): 어깨 선분을 x축에 수평 정렬 ---
+            dx, dy = (R[0] - L[0]), (R[1] - L[1])
+            ang = math.atan2(dy, dx)  # roll 각
+            ca, sa = math.cos(-ang), math.sin(-ang)
+
+            def rot_about_mid(pt):
+                x, y = pt[0] - mid[0], pt[1] - mid[1]
+                xr = ca * x - sa * y
+                yr = sa * x + ca * y
+                return (mid[0] + xr, mid[1] + yr)  # 절대좌표로 복원(전역 이동 보존)
+
+            Lr, Rr, Nr = rot_about_mid(L), rot_about_mid(R), rot_about_mid(N)
+
+            # --- 새 정의 ---
+            W = math.hypot(Rr[0] - Lr[0], Rr[1] - Lr[1])  # dW = 어깨폭(회전 불변)
+            shoulder_y = 0.5 * (Lr[1] + Rr[1])  # 어깨중점의 수직 위치(전역 y 보존)
+            Y = shoulder_y  # dY = 어깨 수직 변위
+            D = (Nr[1] - shoulder_y)  # dD = 코–어깨중점의 '수직' 차(부호 포함)
+
+            ts.append(t);
+            dW.append(W);
+            dY.append(Y);
+            dD.append(D)
         t += dt
     cap.release()
 
