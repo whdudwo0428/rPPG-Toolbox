@@ -1,12 +1,20 @@
 # -*- coding: utf-8 -*-
 # RR-only V1 base runner: LSTM/GRU 선택
-import os, argparse, time, json, numpy as np, torch
+import argparse
+import json
+import numpy as np
+import os
+import time
+import torch
+
 from torch.utils.data import DataLoader
-from .config import (CACHE_DIR, RUNS_DIR, DEVICE, FS_MODEL, LR, EPOCHS, BATCH,
+
+from .config import (CACHE_DIR, RUNS_DIR, DEVICE, LR, EPOCHS, BATCH,
                      RR_WIN_LIST, BUCKET_BS)
 from .data import CohfaceSeqDataset
 from .models import SeqRegressor
 from .train import make_batch, evaluate, train_loop, save_run
+
 
 def parse_bucket(bs_str):
     mp = {}
@@ -40,15 +48,11 @@ def main():
     ap.add_argument("--bucket_bs", type=str, default=BUCKET_BS)
     args = ap.parse_args()
 
-    if args.epochs is not None:   from . import config as _C; _C.EPOCHS = args.epochs
-    if args.lr is not None:       from . import config as _C; _C.LR = args.lr
-
     print(f"[device] {DEVICE}")
     print(f"[wins] RR_WIN_LIST={RR_WIN_LIST}; bucket_bs={args.bucket_bs}")
     ds = CohfaceSeqDataset(args.cache)
     loaders = build_loaders(ds, batch=BATCH, bucket_bs=args.bucket_bs)
 
-    # 80/10/10 split
     n = len(loaders)
     ntr = max(1, int(round(n*0.8)))
     nv  = max(1, int(round(n*0.1)))
@@ -57,17 +61,23 @@ def main():
     te_loader  = loaders[ntr+nv:]
 
     vdict = {"val": val_loader[0] if val_loader else tr_loaders[0]}
-    tdict = {"test": te_loader[0] if te_loader else tr_loaders[-1]}
 
     cell = 'lstm' if args.cell.lower()=='lstm' else 'gru'
     model = SeqRegressor(input_dim=16, hidden=args.hidden, layers=args.layers,
                          cell=cell, bidir=bool(args.bidir), dropout=args.dropout).to(DEVICE)
-    optim = torch.optim.Adam(model.parameters(), lr=args.lr or LR)
+    optim = torch.optim.Adam(model.parameters(), lr=(args.lr or LR))
 
     model = train_loop(model, optim, tr_loaders, vdict, epochs=(args.epochs or EPOCHS))
+
+    def _avg_metrics(loaders):
+        if not loaders: return {}
+        outs = [evaluate(model, ld) for ld in loaders]
+        keys = outs[0].keys()
+        return {k: float(np.mean([o[k] for o in outs])) for k in keys}
+
     metrics = {}
-    metrics["val"]  = vdict and evaluate(model, vdict["val"])
-    metrics["test"] = tdict and evaluate(model, tdict["test"])
+    metrics["val"]  = _avg_metrics(val_loader) if val_loader else _avg_metrics(tr_loaders)
+    metrics["test"] = _avg_metrics(te_loader)  if te_loader  else _avg_metrics([tr_loaders[-1]])
     print("[metrics]", json.dumps(metrics, indent=2, ensure_ascii=False))
 
     tag = time.strftime("%Y%m%d_%H%M%S")

@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
+from collections import defaultdict
+
 import numpy as np
 from torch.utils.data import Sampler
-from collections import defaultdict
+
 
 class LengthBucketBatchSampler(Sampler):
     """길이별로 다른 배치 크기 적용, 패딩 낭비 최소화"""
     def __init__(self, lengths, bucket_bs_map):
+        super().__init__()
         self.lengths = np.asarray(lengths)
         self.buckets = defaultdict(list)
         for idx, L in enumerate(self.lengths):

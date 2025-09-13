@@ -10,9 +10,34 @@ from .config import (DEVICE, RUNS_DIR, LR, EPOCHS, PATIENCE, FS_MODEL,
 from .utils import corr_soft_bestlag, welch_psd_rr_bpm
 
 def pad_collate(batch):
-    # batch: list of dicts produced in make_batch (see train_loop)
-    # we expect already sliced tensors in same length per batch
+    # V1: 길이 버킷으로 동일 길이만 한 배치로 묶기 때문에 불사용
     raise NotImplementedError("pad_collate not used in V1 (we bucket by length).")
+
+def _window_hints(x_np, fs=FS_MODEL):
+    # x_np: [T,16], indices: 0=w_rr,1=y_rr,2=d_rr
+    w = x_np[:,0]; y = x_np[:,1]; d = x_np[:,2]
+    # crude SNR: RR대역 PSD 피크 prominence 근사
+    def _snr(sig):
+        sig = np.asarray(sig, dtype=np.float32)
+        L = len(sig)
+        if L < 64: return 0.0
+        freqs = np.fft.rfftfreq(L, d=1.0/fs)
+        pxx = np.abs(np.fft.rfft(sig))**2
+        m = (freqs>=0.08) & (freqs<=0.60)
+        if not np.any(m): return 0.0
+        p = pxx[m]
+        peak = float(np.max(p)); med = float(np.median(p) + 1e-6)
+        s = (peak - med) / (peak + 1e-6)
+        return float(np.clip(s, 0.0, 1.0))
+    snr = _snr(w)
+    # abs corr hints
+    def _corr(a,b):
+        if len(a)<4: return 0.0
+        c = np.corrcoef(a,b)[0,1]
+        return float(abs(0.0 if np.isnan(c) else c))
+    c_wy = _corr(w,y)
+    c_wd = _corr(w,d)
+    return snr, c_wy, c_wd
 
 def make_batch(dataset, indices):
     # indices: list of (session_idx, a, b, T)
@@ -20,10 +45,13 @@ def make_batch(dataset, indices):
     for (i, a, b, T) in indices:
         x = torch.tensor(dataset.X[i][a:b], dtype=torch.float32)  # [T,16]
         y = torch.tensor(dataset.Y[i][a:b], dtype=torch.float32)  # [T,1]
-        # 힌트 채널(상수)을 윈도우 단위로 채움: snr/corr
-        # 간단 구현: 0으로 두되, 이후 개선 시 여기서 계산하여 채움
-        Xs.append(x); Ys.append(y)
-    X = torch.stack(Xs, dim=0)  # [B,T,C] (같은 길이만 모아 배치)
+        # 힌트 채널(13,14,15)을 윈도우 상수로 채움
+        xn = x.numpy()
+        snr, cwy, cwd = _window_hints(xn)
+        xn[:,13] = snr; xn[:,14] = cwy; xn[:,15] = cwd
+        Xs.append(torch.tensor(xn, dtype=torch.float32))
+        Ys.append(y)
+    X = torch.stack(Xs, dim=0)  # [B,T,C] (동일 길이만 배치)
     Y = torch.stack(Ys, dim=0)  # [B,T,1]
     return X, Y
 
@@ -37,7 +65,6 @@ def evaluate(model, loader, fs=FS_MODEL, device=DEVICE):
             err = pred - Y
             mse = (err**2).mean(dim=[1,2]).cpu().numpy()
             mae = err.abs().mean(dim=[1,2]).cpu().numpy()
-            # numpy 지표
             for b in range(pred.size(0)):
                 pb = pred[b,:,0].detach().cpu().numpy()
                 gb = Y[b,:,0].detach().cpu().numpy()
@@ -77,8 +104,7 @@ def train_loop(model, optimizer, train_loaders, val_loaders, epochs=EPOCHS, devi
                 with autocast(device_type='cuda', enabled=('cuda' in device)):
                     pred = model(X)
                     mse = torch.mean((pred - Y)**2)
-                    # corr@soft-best-lag (numpy ref → torch로 대체 가능하나 ep 마다 배치 샘플링으로 근사)
-                    # 여기서는 간소화: 배치 평균으로 numpy 함수 호출
+                    # corr@soft-best-lag은 numpy로 계산(상수 취급), MSE 그래프만 유지
                     loss_phase = 0.0
                     for b in range(pred.size(0)):
                         pb = pred[b,:,0].detach().cpu().numpy()
@@ -86,18 +112,18 @@ def train_loop(model, optimizer, train_loaders, val_loaders, epochs=EPOCHS, devi
                         c2, _ = corr_soft_bestlag(pb, gb, fs=FS_MODEL, lag_s=LAG_MAX_S, beta=PHASE_BETA)
                         loss_phase += (1.0 - c2)
                     loss_phase = loss_phase / max(1, pred.size(0))
-                    loss = mse + PHASE_LAMBDA * loss_phase
-                scaler.scale(torch.tensor(loss, dtype=torch.float32, device=device)).backward()
+                    # BUGFIX: 그래프 유지 (mse 경로)
+                    total_loss = mse + (PHASE_LAMBDA * torch.as_tensor(loss_phase, device=device))
+                scaler.scale(total_loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
                 ep_loss.append(float(mse.detach().cpu().item()))
 
-        # 평가
+        # 평가 (현재 Early-Stop은 'val' 첫 그룹 기준)
         val_metrics = {}
         for k, vloader in val_loaders.items():
             val_metrics[k] = evaluate(model, vloader, device=device)
 
-        # 선택 기준: corr_bestlag 최대
         key = "corr_bestlag"
         cur = val_metrics.get("val", {}).get(key, -1e9)
         if (best_val is None) or (cur > best_val):
@@ -111,7 +137,6 @@ def train_loop(model, optimizer, train_loaders, val_loaders, epochs=EPOCHS, devi
         if patience >= PATIENCE:
             print("[early stop]")
             break
-    # 복원
     if best_state is not None:
         model.load_state_dict(best_state)
     return model

@@ -3,10 +3,15 @@
 전처리/캐시: 비디오→(dW,dY,dD,dD_perp), H5→resp, 공통 시간축 리샘플(256 Hz)
 출력: cache_dir/s{subject}_k{session}.npz  (keys: t,dW,dY,dD,dD_perp,resp)
 """
-import os, glob, h5py, numpy as np
+import h5py
+import numpy as np
+import os
+
 from scipy.interpolate import interp1d
-from .pose_backend import extract_displacements
+
 from .config import FS_RESAMP
+from .pose_backend import extract_displacements
+
 
 def _resample(ts, xs, fs=256.0):
     if len(ts) < 2:

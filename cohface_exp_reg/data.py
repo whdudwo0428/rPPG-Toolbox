@@ -10,13 +10,12 @@ from .utils import zscore, rr_bandpass_z, env_rr, rr_subband_env, butter_lowpass
 class CohfaceSeqDataset(Dataset):
     """
     RR-only 16채널 입력 생성
-    cache npz: keys = t, dW, dY, dD, dD_perp(optional), resp
+    cache npz: keys = t, dW, dY, dD, dD_perp(optional), resp(or g_resp)
     """
     def __init__(self, cache_dir, subjects=None, sessions=None):
         self.cache_dir = cache_dir
         self.items = []
         for p in sorted(glob.glob(os.path.join(cache_dir, "s*_k*.npz"))):
-            # 필터링은 파일명 기준(선택)
             self.items.append(p)
         self.X, self.Y, self.L = self._build()
 
@@ -47,18 +46,18 @@ class CohfaceSeqDataset(Dataset):
         env_d  = env_rr(d_norm_raw, fs, lo, hi)
         env_dw = env_rr(dw_rel_raw, fs, lo, hi)
 
-        # 결합/서브밴드 (4)
-        w_bp = rr_bandpass_z(w_rel_raw, fs, lo, hi)
-        y_bp = rr_bandpass_z(y_norm_raw, fs, lo, hi)
-        d_bp = rr_bandpass_z(d_norm_raw, fs, lo, hi)
-        cross_wy_rr = rr_bandpass_z(w_bp * y_bp, fs, lo, hi)
-        cross_wd_rr = rr_bandpass_z(w_bp * d_bp, fs, lo, hi)
+        # 결합/서브밴드 (4) — raw bandpass끼리 곱 → RR-BP → z
+        from .utils import butter_bandpass
+        w_bp_raw = butter_bandpass(w_rel_raw, fs, lo, hi)
+        y_bp_raw = butter_bandpass(y_norm_raw, fs, lo, hi)
+        d_bp_raw = butter_bandpass(d_norm_raw, fs, lo, hi)
+        cross_wy_rr = rr_bandpass_z(w_bp_raw * y_bp_raw, fs, lo, hi)
+        cross_wd_rr = rr_bandpass_z(w_bp_raw * d_bp_raw, fs, lo, hi)
         env_low_y   = rr_subband_env(y_norm_raw, fs, lo=0.08, hi=0.25)
         env_high_y  = rr_subband_env(y_norm_raw, fs, lo=0.25, hi=0.60)
 
-        # 느린 컨텍스트 (4) — RR 대역 사용 금지
+        # 느린 컨텍스트 (4) — RR 대역 금지
         w_trend = zscore(butter_lowpass(w_rel_raw, fs, fc=0.2))
-        # 힌트 채널(윈도우 내 상수 → 여기서는 자리만 0으로; window 단계에서 채움)
         snr_rr_hint = np.zeros_like(w_trend, dtype=np.float32)
         corr_hint_wy= np.zeros_like(w_trend, dtype=np.float32)
         corr_hint_wd= np.zeros_like(w_trend, dtype=np.float32)
@@ -76,14 +75,13 @@ class CohfaceSeqDataset(Dataset):
         for p in self.items:
             rec = dict(np.load(p, allow_pickle=True))
             t = rec["t"].astype(np.float32)
-            resp = rec["resp"].astype(np.float32)
-            # 타깃도 RR 대역 + z
+            # resp 키 호환 (기존 g_resp 지원)
+            resp = rec.get("resp", rec.get("g_resp")).astype(np.float32)
             y = rr_bandpass_z(resp, FS_MODEL, *RESP_BAND).astype(np.float32)
             X = self._build_features(rec)
             Xs.append(X); Ys.append(y[:,None]); Ls.append(len(y))
         return Xs, Ys, Ls
 
-    # ---- 멀티스케일 윈도우 샘플 인덱스 ----
     def _gen_windows(self, L):
         fs = FS_MODEL
         for w in RR_WIN_LIST:
@@ -93,9 +91,8 @@ class CohfaceSeqDataset(Dataset):
                 yield T, s, s+T
 
     def __len__(self):
-        # 전체 윈도우 수를 모르므로 대략 합산으로 만들 수도 있으나,
-        # 간단하게 (샘플 생성은 collate에서) 세션 개수 반환
-        return sum(1 for _ in range(len(self.items)))
+        # 세션 수 반환 (실제 학습은 iter_windows로 윈도우 생성)
+        return len(self.items)
 
     def iter_windows(self):
         for i in range(len(self.items)):
@@ -103,5 +100,3 @@ class CohfaceSeqDataset(Dataset):
             L = len(Y)
             for T, a, b in self._gen_windows(L):
                 yield (i, a, b, T)
-
-    # collate는 train.py에서 커스텀으로 구현

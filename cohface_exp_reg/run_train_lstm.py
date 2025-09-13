@@ -1,12 +1,17 @@
 # -*- coding: utf-8 -*-
-import os, argparse, time, json, numpy as np, torch
+import argparse
+import json
+import os
+import time
+import torch
+
 from torch.utils.data import DataLoader
-from .config import (CACHE_DIR, RUNS_DIR, DEVICE, FS_MODEL, LR, EPOCHS, BATCH,
-                     RR_WIN_LIST, BUCKET_BS)
+
+from .config import (CACHE_DIR, RUNS_DIR, DEVICE, LR, EPOCHS, BUCKET_BS)
 from .data import CohfaceSeqDataset
 from .models import SeqRegressor
-from .sampler import LengthBucketBatchSampler
 from .train import make_batch, evaluate, train_loop, save_run
+
 
 def parse_bucket(bs_str):
     mp = {}

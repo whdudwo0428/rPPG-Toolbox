@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import numpy as np
-from scipy.signal import butter, filtfilt, hilbert, welch, get_window
-from typing import Tuple
+from scipy.signal import butter, filtfilt, hilbert, welch
+
 
 def zscore(x, eps=1e-8):
     x = np.asarray(x)

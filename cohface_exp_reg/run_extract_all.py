@@ -1,7 +1,11 @@
 # -*- coding: utf-8 -*-
-import os, argparse, glob
+import argparse
+import os
+
 from tqdm import tqdm
+
 from .config import DATA_ROOT, CACHE_DIR
+
 
 def main():
     ap = argparse.ArgumentParser()
