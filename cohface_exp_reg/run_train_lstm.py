@@ -3,8 +3,9 @@ import argparse
 import json
 import os
 import time
-import torch
 
+import numpy as np
+import torch
 from torch.utils.data import DataLoader
 
 from .config import (CACHE_DIR, RUNS_DIR, DEVICE, LR, EPOCHS, BUCKET_BS)
@@ -49,25 +50,35 @@ def main():
     print(f"[device] {DEVICE}")
     ds = CohfaceSeqDataset(args.cache)
     loaders = build_loaders(ds, batch=64)
-    # 간단 분할: 앞 80% train, 다음 10% val, 마지막 10% test (세션 윈도우 단위)
+
+    # 80/10/10 split (길이 버킷 그룹 단위)
     n = len(loaders)
     ntr = max(1, int(round(n*0.8)))
     nv  = max(1, int(round(n*0.1)))
     tr_loaders = loaders[:ntr]
     val_loader = loaders[ntr:ntr+nv]
     te_loader  = loaders[ntr+nv:]
+
+    # ── 변경 ①: Early-Stop은 기존대로 "첫 번째 val 그룹"을 사용
     vdict = {"val": val_loader[0] if val_loader else tr_loaders[0]}
-    tdict = {"test": te_loader[0] if te_loader else tr_loaders[-1]}
 
     model = SeqRegressor(input_dim=16, hidden=args.hidden, layers=args.layers,
                          cell='lstm', bidir=bool(args.bidir), dropout=args.dropout).to(DEVICE)
     optim = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     model = train_loop(model, optim, tr_loaders, vdict, epochs=args.epochs)
-    # 최종 평가
+
+    # ── 변경 ②: 최종 리포트는 모든 val/test 그룹 평가 후 "평균"으로 집계
+    def _avg_metrics(loaders):
+        if not loaders:
+            return {}
+        outs = [evaluate(model, ld) for ld in loaders]
+        keys = outs[0].keys()
+        return {k: float(np.mean([o[k] for o in outs])) for k in keys}
+
     metrics = {}
-    metrics["val"]  = vdict and evaluate(model, vdict["val"])
-    metrics["test"] = tdict and evaluate(model, tdict["test"])
+    metrics["val"]  = _avg_metrics(val_loader) if val_loader else _avg_metrics(tr_loaders)
+    metrics["test"] = _avg_metrics(te_loader)  if te_loader  else _avg_metrics([tr_loaders[-1]])
     print("[metrics]", json.dumps(metrics, indent=2, ensure_ascii=False))
 
     # 저장
