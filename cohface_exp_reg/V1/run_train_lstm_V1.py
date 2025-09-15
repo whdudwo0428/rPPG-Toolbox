@@ -27,9 +27,8 @@ def parse_bucket(spec: str):
 
 def build_loaders_by_session(ds, bucket_bs=None, num_workers=0, pin_memory=0, seed=42):
     rng = np.random.default_rng(seed)
-    windows = list(ds.iter_windows())  # (session_i, a, b, T)
+    windows = list(ds.iter_windows())
 
-    # 세션별 묶기
     sess_to_wins = {}
     for (i, a, b, T) in windows:
         sess_to_wins.setdefault(i, []).append((i, a, b, T))
@@ -50,7 +49,6 @@ def build_loaders_by_session(ds, bucket_bs=None, num_workers=0, pin_memory=0, se
             for it in sess_to_wins[i]:
                 T = it[-1]
                 bylen.setdefault(T, []).append(it)
-
         bs_map = parse_bucket(bucket_bs)
         loaders = []
         for T, group in bylen.items():
@@ -74,9 +72,9 @@ def main():
     ap.add_argument("--cache", type=str, default=CACHE_DIR)
     ap.add_argument("--epochs", type=int, default=EPOCHS)
     ap.add_argument("--lr", type=float, default=LR)
-    ap.add_argument("--hidden", type=int, default=256)
-    ap.add_argument("--layers", type=int, default=3)
-    ap.add_argument("--bidir", type=int, default=1)  # 양방향 권장
+    ap.add_argument("--hidden", type=int, default=128)
+    ap.add_argument("--layers", type=int, default=2)
+    ap.add_argument("--bidir", type=int, default=1)
     ap.add_argument("--dropout", type=float, default=0.1)
     ap.add_argument("--bucket_bs", type=str, default=BUCKET_BS)
     ap.add_argument("--num_workers", type=int, default=8)
@@ -85,7 +83,6 @@ def main():
 
     ds = CohfaceSeqDataset(args.cache)
 
-    # 세션 기반 분할 + 길이 버킷 로더
     tr_loaders, val_loaders, te_loaders = build_loaders_by_session(
         ds,
         bucket_bs=args.bucket_bs,
@@ -94,14 +91,13 @@ def main():
         seed=42,
     )
 
-    # Early-Stop: 모든 Val 로더 평균 corr_bestlag
     vdict = {f"val_{k}": ld for k, ld in enumerate(val_loaders)} or {"val_fallback": tr_loaders[0]}
 
     model = SeqRegressor(
         input_dim=16,
         hidden=args.hidden,
         layers=args.layers,
-        cell='gru',
+        cell='lstm',
         bidir=bool(args.bidir),
         dropout=args.dropout
     ).to(DEVICE)
@@ -123,7 +119,7 @@ def main():
     print("[metrics]", json.dumps(metrics, indent=2, ensure_ascii=False))
 
     tag = time.strftime("%Y%m%d_%H%M%S")
-    run_dir = os.path.join(RUNS_DIR, f"gru_rronly_{tag}")
+    run_dir = os.path.join(RUNS_DIR, f"lstm_rronly_{tag}")
     save_run(run_dir, model, metrics)
 
 
