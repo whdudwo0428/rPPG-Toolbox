@@ -1,102 +1,158 @@
 # -*- coding: utf-8 -*-
-import os, glob, json
-import numpy as np
-from torch.utils.data import Dataset
-from typing import List, Dict, Any
+import glob
+import os
+import re
 
-from .config import FS_MODEL, RESP_BAND, RR_WIN_LIST, STRIDE_FRAC, FIXED_STRIDE
-from .utils import zscore, rr_bandpass_z, env_rr, rr_subband_env, butter_lowpass
+import numpy as np
+import torch
+from torch.utils.data import Dataset
+
+from .config import (
+    FS_MODEL, RR_WIN_LIST, STRIDE_FRAC, FIXED_STRIDE, W_TREND_FC,
+    ENABLE_PREALIGN, PREALIGN_MAX_LAG
+)
+from .utils import (
+    zscore, rr_bandpass_z, env_rr, rr_subband_env,
+    butter_lowpass, global_sign_and_lag
+)
+
 
 class CohfaceSeqDataset(Dataset):
-    """
-    RR-only 16채널 입력 생성
-    cache npz: keys = t, dW, dY, dD, dD_perp(optional), resp(or g_resp)
-    """
-    def __init__(self, cache_dir, subjects=None, sessions=None):
-        self.cache_dir = cache_dir
-        self.items = []
-        for p in sorted(glob.glob(os.path.join(cache_dir, "s*_k*.npz"))):
-            self.items.append(p)
-        self.X, self.Y, self.L = self._build()
+    """Build 16-ch RR-only features from cached npz files and provide sliding windows."""
 
-    # ---------------- 16채널 구성 ----------------
-    def _build_features(self, rec: Dict[str, np.ndarray]):
-        fs = FS_MODEL
-        lo, hi = RESP_BAND
-        dW = rec["dW"].astype(np.float32)
-        dY = rec["dY"].astype(np.float32)
-        dD = rec.get("dD_perp", rec["dD"]).astype(np.float32)
+    def __init__(self, cache_dir: str, subset: str = "train", seed: int = 42):
+        super().__init__()
+        assert subset in {"train", "val", "test"}
+        np.random.seed(seed)
+        files = sorted(glob.glob(os.path.join(cache_dir, "*.npz")))
+        if len(files) == 0:
+            raise FileNotFoundError(f"No npz found under {cache_dir}")
 
-        W0 = np.median(dW) + 1e-6
-        Wslow = butter_lowpass(dW, fs, fc=0.03)
-        w_rel_raw  = dW / W0 - 1.0
-        y_norm_raw = dY / (Wslow + 1e-6)
-        d_norm_raw = dD / (Wslow + 1e-6)
-        dw_rel_raw = np.gradient(dW) * fs / W0  # d/dt dW / W0
+        # simple subject/session split by hash
+        def _split_key(p):
+            b = os.path.basename(p)
+            nums = [int(x) for x in re.findall(r"\d+", b)]
+            return 10 * nums[0] + (nums[1] if len(nums) > 1 else 0)
 
-        # RR 원파형 (4)
-        w_rr  = rr_bandpass_z(w_rel_raw, fs, lo, hi)
-        y_rr  = rr_bandpass_z(y_norm_raw, fs, lo, hi)
-        d_rr  = rr_bandpass_z(d_norm_raw, fs, lo, hi)
-        dw_rr = rr_bandpass_z(dw_rel_raw, fs, lo, hi)
+        # filter only valid npz
+        pool = []
+        for p in files:
+            try:
+                with np.load(p) as z:
+                    if not all(k in z for k in ("t", "dW", "dY", "dD", "resp")):
+                        continue
+                    pool.append(p)
+            except Exception:
+                continue
+        files = pool
+        keys = [_split_key(p) for p in files]
+        uniq = sorted(set(keys))
+        uniq_train = [k for i, k in enumerate(uniq) if i % 5 not in (3, 4)]  # 60%
+        uniq_val = [k for i, k in enumerate(uniq) if i % 5 == 3]  # 20%
+        uniq_test = [k for i, k in enumerate(uniq) if i % 5 == 4]  # 20%
 
-        # 위상 불변 엔벨로프 (4)
-        env_w  = env_rr(w_rel_raw, fs, lo, hi)
-        env_y  = env_rr(y_norm_raw, fs, lo, hi)
-        env_d  = env_rr(d_norm_raw, fs, lo, hi)
-        env_dw = env_rr(dw_rel_raw, fs, lo, hi)
+        def _sel(ks):
+            return [p for p, k in zip(files, keys) if k in ks]
 
-        # 결합/서브밴드 (4) — raw bandpass끼리 곱 → RR-BP → z
-        from .utils import butter_bandpass
-        w_bp_raw = butter_bandpass(w_rel_raw, fs, lo, hi)
-        y_bp_raw = butter_bandpass(y_norm_raw, fs, lo, hi)
-        d_bp_raw = butter_bandpass(d_norm_raw, fs, lo, hi)
-        cross_wy_rr = rr_bandpass_z(w_bp_raw * y_bp_raw, fs, lo, hi)
-        cross_wd_rr = rr_bandpass_z(w_bp_raw * d_bp_raw, fs, lo, hi)
-        env_low_y   = rr_subband_env(y_norm_raw, fs, lo=0.08, hi=0.25)
-        env_high_y  = rr_subband_env(y_norm_raw, fs, lo=0.25, hi=0.60)
+        if subset == "train":
+            files = _sel(uniq_train)
+        elif subset == "val":
+            files = _sel(uniq_val)
+        else:
+            files = _sel(uniq_test)
+        self.files = files
 
-        # 느린 컨텍스트 (4) — RR 대역 금지
-        w_trend = zscore(butter_lowpass(w_rel_raw, fs, fc=0.2))
-        snr_rr_hint = np.zeros_like(w_trend, dtype=np.float32)
-        corr_hint_wy= np.zeros_like(w_trend, dtype=np.float32)
-        corr_hint_wd= np.zeros_like(w_trend, dtype=np.float32)
+        # Preload and optionally pre-align
+        self.sessions = []  # list of dicts with 'X' (T,16), 'Y' (T,)
+        for p in self.files:
+            with np.load(p) as z:
+                t = z["t"].astype(np.float32)
+                dW = z["dW"].astype(np.float32)
+                dY = z["dY"].astype(np.float32)
+                dD = (z["dD_perp"].astype(np.float32)
+                      if "dD_perp" in z else z["dD"].astype(np.float32))
+                resp = z["resp"].astype(np.float32)
+            # build base normals
+            W0 = np.median(dW) + 1e-6
+            Wslow = butter_lowpass(dW, FS_MODEL, fc=W_TREND_FC) + 1e-6
+            w_rel = dW / W0 - 1.0
+            y_n = dY / Wslow
+            d_n = dD / Wslow
+            # simple derivative of dW (centered)
+            dw = np.gradient(dW) / (W0 + 1e-6)
+            # Optional pre-alignment of RESP against y_n
+            if ENABLE_PREALIGN:
+                sgn, lag = global_sign_and_lag(y_n, resp, fs=FS_MODEL, max_lag_s=PREALIGN_MAX_LAG)
+                if lag < 0:
+                    resp = np.concatenate([resp[-lag:], np.zeros((-lag,), np.float32)])
+                elif lag > 0:
+                    resp = np.concatenate([np.zeros((lag,), np.float32), resp[:-lag]])
+                resp = float(sgn) * resp
+            # Stack 16 channels
+            w_rr = rr_bandpass_z(w_rel, FS_MODEL)
+            y_rr = rr_bandpass_z(y_n, FS_MODEL)
+            d_rr = rr_bandpass_z(d_n, FS_MODEL)
+            dw_rr = rr_bandpass_z(dw, FS_MODEL)
+            env_w = env_rr(w_rel, FS_MODEL)
+            env_y = env_rr(y_n, FS_MODEL)
+            env_d = env_rr(d_n, FS_MODEL)
+            env_dw = env_rr(dw, FS_MODEL)
+            cross_wy_rr = rr_bandpass_z(w_rr * y_rr, FS_MODEL)
+            cross_wd_rr = rr_bandpass_z(w_rr * d_rr, FS_MODEL)
+            env_low_y = rr_subband_env(y_n, FS_MODEL, lo=0.08, hi=0.25)
+            env_high_y = rr_subband_env(y_n, FS_MODEL, lo=0.25, hi=0.60)
+            w_trend = zscore(butter_lowpass(w_rel, FS_MODEL, fc=0.2))
 
-        X = np.stack([
-            w_rr, y_rr, d_rr, dw_rr,
-            env_w, env_y, env_d, env_dw,
-            cross_wy_rr, cross_wd_rr, env_low_y, env_high_y,
-            w_trend, snr_rr_hint, corr_hint_wy, corr_hint_wd
-        ], axis=-1).astype(np.float32)
-        return X
+            # hints per-session (constant to be repeated per-window later)
+            def _snr(sig):
+                x = rr_bandpass_z(sig, FS_MODEL)
+                pxx = np.abs(np.fft.rfft(x)) ** 2
+                m = pxx.max() + 1e-6
+                return float(np.clip((m - np.median(pxx)) / m, 0, 1))
 
-    def _build(self):
-        Xs, Ys, Ls = [], [], []
-        for p in self.items:
-            rec = dict(np.load(p, allow_pickle=True))
-            t = rec["t"].astype(np.float32)
-            # resp 키 호환 (기존 g_resp 지원)
-            resp = rec.get("resp", rec.get("g_resp")).astype(np.float32)
-            y = rr_bandpass_z(resp, FS_MODEL, *RESP_BAND).astype(np.float32)
-            X = self._build_features(rec)
-            Xs.append(X); Ys.append(y[:,None]); Ls.append(len(y))
-        return Xs, Ys, Ls
+            snr_hint = _snr(w_rel)
+            corr_hint_wy = float(abs(np.corrcoef(w_rr, y_rr)[0, 1])) if len(w_rr) > 8 else 0.0
+            corr_hint_wd = float(abs(np.corrcoef(w_rr, d_rr)[0, 1])) if len(w_rr) > 8 else 0.0
 
-    def _gen_windows(self, L):
-        fs = FS_MODEL
-        for w in RR_WIN_LIST:
-            T = int(round(w*fs))
-            stride = int(round(FIXED_STRIDE*fs)) if FIXED_STRIDE is not None else max(1, int(round(w*fs*STRIDE_FRAC)))
-            for s in range(0, max(1, L-T+1), stride):
-                yield T, s, s+T
+            X16 = np.stack([
+                w_rr, y_rr, d_rr, dw_rr,
+                env_w, env_y, env_d, env_dw,
+                cross_wy_rr, cross_wd_rr, env_low_y, env_high_y,
+                w_trend,
+                np.full_like(w_rr, snr_hint, dtype=np.float32),
+                np.full_like(w_rr, corr_hint_wy, dtype=np.float32),
+                np.full_like(w_rr, corr_hint_wd, dtype=np.float32)
+            ], axis=-1).astype(np.float32)
+
+            Y = rr_bandpass_z(resp, FS_MODEL)  # target RR waveform (z) for loss/eval
+
+            self.sessions.append({"X": X16, "Y": Y})
+
+        # build window indices
+        self.idxs = []  # list of (sess_id, start, length)
+        strides = []
+        for win_s in RR_WIN_LIST:
+            T = int(round(win_s * FS_MODEL))
+            if FIXED_STRIDE is None:
+                stride = int(round(T * STRIDE_FRAC))
+            else:
+                stride = int(round(FIXED_STRIDE * FS_MODEL))
+            strides.append((T, stride))
+        for sid, s in enumerate(self.sessions):
+            L = len(s["Y"])
+            for T, stride in strides:
+                if L < T:
+                    continue
+                for st in range(0, L - T + 1, stride):
+                    self.idxs.append((sid, st, T))
 
     def __len__(self):
-        # 세션 수 반환 (실제 학습은 iter_windows로 윈도우 생성)
-        return len(self.items)
+        return len(self.idxs)
 
-    def iter_windows(self):
-        for i in range(len(self.items)):
-            X = self.X[i]; Y = self.Y[i][:,0]
-            L = len(Y)
-            for T, a, b in self._gen_windows(L):
-                yield (i, a, b, T)
+    def __getitem__(self, i: int):
+        sid, st, T = self.idxs[i]
+        X = self.sessions[sid]["X"][st:st + T]  # [T,16]
+        Y = self.sessions[sid]["Y"][st:st + T]  # [T]
+        X = torch.from_numpy(X)  # [T,16]
+        Y = torch.from_numpy(Y).unsqueeze(-1)  # [T,1]
+        return X, Y

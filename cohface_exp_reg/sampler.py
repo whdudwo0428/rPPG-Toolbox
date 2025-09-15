@@ -1,33 +1,42 @@
 # -*- coding: utf-8 -*-
-from collections import defaultdict
+import random
+from typing import List, Dict
 
-import numpy as np
 from torch.utils.data import Sampler
 
 
-class LengthBucketBatchSampler(Sampler):
-    """길이별로 다른 배치 크기 적용, 패딩 낭비 최소화"""
-    def __init__(self, lengths, bucket_bs_map):
-        super().__init__()
-        self.lengths = np.asarray(lengths)
-        self.buckets = defaultdict(list)
-        for idx, L in enumerate(self.lengths):
-            self.buckets[L].append(idx)
-        self.bucket_bs_map = bucket_bs_map
+class BucketBatchSampler(Sampler[List[int]]):
+    """Group by sequence length and yield batches based on bucket→batchsize map.
+    expects dataset.idxs = (sid, start, T)
+    """
 
-        self._batches = []
-        for L, idxs in self.buckets.items():
-            bs = self.bucket_bs_map.get(L, 8)
-            for i in range(0, len(idxs), bs):
-                self._batches.append(idxs[i:i+bs])
-
-    def __len__(self):
-        return len(self._batches)
+    def __init__(self, dataset, bucket_bs: Dict[int, int], shuffle=True):
+        self.dataset = dataset
+        self.shuffle = shuffle
+        # collect indices per T
+        perT = {}
+        for i, (_sid, _st, T) in enumerate(dataset.idxs):
+            perT.setdefault(T, []).append(i)
+        self.perT = perT
+        self.bucket_bs = bucket_bs
 
     def __iter__(self):
-        # 셔플은 상위 DataLoader의 shuffle=False로 두고 여기서 섞어도 됨
-        rng = np.random.default_rng()
-        order = np.arange(len(self._batches))
-        rng.shuffle(order)
-        for i in order:
-            yield self._batches[i]
+        all_batches = []
+        for T, idxs in self.perT.items():
+            bs = self.bucket_bs.get(T, 4)
+            idxs = idxs[:]
+            if self.shuffle:
+                random.shuffle(idxs)
+            for i in range(0, len(idxs), bs):
+                all_batches.append(idxs[i:i + bs])
+        if self.shuffle:
+            random.shuffle(all_batches)
+        for b in all_batches:
+            yield b
+
+    def __len__(self):
+        n = 0
+        for T, idxs in self.perT.items():
+            bs = self.bucket_bs.get(T, 4)
+            n += (len(idxs) + bs - 1) // bs
+        return n
