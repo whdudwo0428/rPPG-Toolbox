@@ -11,6 +11,7 @@ class BucketBatchSampler(Sampler[List[int]]):
     """
 
     def __init__(self, dataset, bucket_bs: Dict[int, int], shuffle=True):
+        super().__init__()
         self.dataset = dataset
         self.shuffle = shuffle
         # collect indices per T

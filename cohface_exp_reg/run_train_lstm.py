@@ -37,8 +37,10 @@ def main():
 
     train_set = CohfaceSeqDataset(args.cache, subset='train')
     val_set = CohfaceSeqDataset(args.cache, subset='val')
+    test_set = CohfaceSeqDataset(args.cache, subset='test')
 
     bucket = parse_bucket_bs(args.bucket_bs)
+
     train_loader = DataLoader(
         train_set,
         batch_sampler=BucketBatchSampler(train_set, bucket, shuffle=True),
@@ -47,8 +49,13 @@ def main():
     )
     val_loader = DataLoader(
         val_set,
-        batch_size=4,
-        shuffle=False,
+        batch_sampler=BucketBatchSampler(val_set, bucket, shuffle=False),
+        num_workers=args.num_workers,
+        pin_memory=bool(args.pin_memory),
+    )
+    test_loader = DataLoader(
+        test_set,
+        batch_sampler=BucketBatchSampler(test_set, bucket, shuffle=False),
         num_workers=args.num_workers,
         pin_memory=bool(args.pin_memory),
     )
@@ -62,13 +69,13 @@ def main():
 
     model = train_loop(model, opt, train_loader, val_loader, epochs=args.epochs, device=DEVICE)
 
-    # final eval on val
     val_metrics = evaluate(model, val_loader)
+    test_metrics = evaluate(model, test_loader)
 
     tag = f"lstm_rronly_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     run_dir = os.path.join(RUNS_DIR, tag)
-    save_run(run_dir, model, {"val": val_metrics})
-    print("[metrics]", {"val": val_metrics})
+    save_run(run_dir, model, {"val": val_metrics, "test": test_metrics})
+    print("[metrics]", {"val": val_metrics, "test": test_metrics})
 
 
 if __name__ == '__main__':

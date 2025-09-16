@@ -13,14 +13,31 @@ from .config import (
 )
 from .utils import (
     zscore, rr_bandpass_z, env_rr, rr_subband_env,
-    butter_lowpass, global_sign_and_lag
+    butter_lowpass, global_sign_and_lag,
+    robust_clip, _finite_fill
 )
+
+
+def _safe_norm(num: np.ndarray, denom: np.ndarray, base: float, floor_frac: float = 0.3) -> np.ndarray:
+    """
+    Normalize 'num/denom' with a robust floor on denom:
+      denom = max(denom, floor_frac * base)
+    where base is typically median(dW).
+    """
+    num = _finite_fill(num)
+    denom = _finite_fill(denom)
+    floor = max(1e-6, float(base) * float(floor_frac))
+    denom = np.maximum(denom, floor)
+    y = num / (denom + 1e-6)
+    # guard against extreme outliers before any filtering
+    y = robust_clip(y, clip_std=8.0, abs_max=1e6)
+    return y.astype(np.float32)
 
 
 class CohfaceSeqDataset(Dataset):
     """Build 16-ch RR-only features from cached npz files and provide sliding windows."""
 
-    def __init__(self, cache_dir: str, subset: str = "train", seed: int = 42):
+    def __init__(self, cache_dir: str, subset: str = "train", seed: int = 42, floor_frac: float = 0.5):
         super().__init__()
         assert subset in {"train", "val", "test"}
         np.random.seed(seed)
@@ -28,13 +45,12 @@ class CohfaceSeqDataset(Dataset):
         if len(files) == 0:
             raise FileNotFoundError(f"No npz found under {cache_dir}")
 
-        # simple subject/session split by hash
         def _split_key(p):
             b = os.path.basename(p)
             nums = [int(x) for x in re.findall(r"\d+", b)]
             return 10 * nums[0] + (nums[1] if len(nums) > 1 else 0)
 
-        # filter only valid npz
+        # validate npz keys
         pool = []
         for p in files:
             try:
@@ -72,14 +88,24 @@ class CohfaceSeqDataset(Dataset):
                 dD = (z["dD_perp"].astype(np.float32)
                       if "dD_perp" in z else z["dD"].astype(np.float32))
                 resp = z["resp"].astype(np.float32)
-            # build base normals
-            W0 = np.median(dW) + 1e-6
+
+            # robust bases
+            W0 = float(np.median(_finite_fill(dW))) + 1e-6
             Wslow = butter_lowpass(dW, FS_MODEL, fc=W_TREND_FC) + 1e-6
+            # 모니터링: 바닥 적용 비율(너무 높으면 품질 이슈 의심)
+            _floor = max(1e-6, W0 * floor_frac)
+            _hit_ratio = float(np.mean(Wslow < _floor))
+            if _hit_ratio > 0.10:
+                print(f"[warn] W_slow floor hit ratio={_hit_ratio:.1%} (>10%) — {os.path.basename(p)}")
+
+            # normalized sources with denom floor
             w_rel = dW / W0 - 1.0
-            y_n = dY / Wslow
-            d_n = dD / Wslow
-            # simple derivative of dW (centered)
-            dw = np.gradient(dW) / (W0 + 1e-6)
+            y_n = _safe_norm(dY, Wslow, base=W0, floor_frac=floor_frac)
+            d_n = _safe_norm(dD, Wslow, base=W0, floor_frac=floor_frac)
+            # derivative of dW (centered), then robustify
+            dw = np.gradient(dW).astype(np.float32) / (W0 + 1e-6)
+            dw = robust_clip(dw)
+
             # Optional pre-alignment of RESP against y_n
             if ENABLE_PREALIGN:
                 sgn, lag = global_sign_and_lag(y_n, resp, fs=FS_MODEL, max_lag_s=PREALIGN_MAX_LAG)
@@ -88,32 +114,40 @@ class CohfaceSeqDataset(Dataset):
                 elif lag > 0:
                     resp = np.concatenate([np.zeros((lag,), np.float32), resp[:-lag]])
                 resp = float(sgn) * resp
-            # Stack 16 channels
+
+            # 16ch stack (each branch internally robustified + z-score)
             w_rr = rr_bandpass_z(w_rel, FS_MODEL)
             y_rr = rr_bandpass_z(y_n, FS_MODEL)
             d_rr = rr_bandpass_z(d_n, FS_MODEL)
             dw_rr = rr_bandpass_z(dw, FS_MODEL)
+
             env_w = env_rr(w_rel, FS_MODEL)
             env_y = env_rr(y_n, FS_MODEL)
             env_d = env_rr(d_n, FS_MODEL)
             env_dw = env_rr(dw, FS_MODEL)
+
             cross_wy_rr = rr_bandpass_z(w_rr * y_rr, FS_MODEL)
             cross_wd_rr = rr_bandpass_z(w_rr * d_rr, FS_MODEL)
+
             env_low_y = rr_subband_env(y_n, FS_MODEL, lo=0.08, hi=0.25)
             env_high_y = rr_subband_env(y_n, FS_MODEL, lo=0.25, hi=0.60)
-            w_trend = zscore(butter_lowpass(w_rel, FS_MODEL, fc=0.2))
 
-            # hints per-session (constant to be repeated per-window later)
+            # slow trend context (kept outside RR band)
+            from .utils import butter_lowpass as _lp
+            w_trend = zscore(_lp(w_rel, FS_MODEL, fc=0.2))
+
+            # session-level hints (scalar)
             def _snr(sig):
                 x = rr_bandpass_z(sig, FS_MODEL)
-                pxx = np.abs(np.fft.rfft(x)) ** 2
-                m = pxx.max() + 1e-6
-                return float(np.clip((m - np.median(pxx)) / m, 0, 1))
+                p = np.abs(np.fft.rfft(x)) ** 2
+                m = p.max() + 1e-6
+                return float(np.clip((m - np.median(p)) / m, 0, 1))
 
             snr_hint = _snr(w_rel)
             corr_hint_wy = float(abs(np.corrcoef(w_rr, y_rr)[0, 1])) if len(w_rr) > 8 else 0.0
             corr_hint_wd = float(abs(np.corrcoef(w_rr, d_rr)[0, 1])) if len(w_rr) > 8 else 0.0
 
+            # final stack (ensure finite)
             X16 = np.stack([
                 w_rr, y_rr, d_rr, dw_rr,
                 env_w, env_y, env_d, env_dw,
@@ -123,8 +157,10 @@ class CohfaceSeqDataset(Dataset):
                 np.full_like(w_rr, corr_hint_wy, dtype=np.float32),
                 np.full_like(w_rr, corr_hint_wd, dtype=np.float32)
             ], axis=-1).astype(np.float32)
+            X16 = _finite_fill(X16)
 
-            Y = rr_bandpass_z(resp, FS_MODEL)  # target RR waveform (z) for loss/eval
+            # target RR waveform (z) for loss/eval
+            Y = rr_bandpass_z(resp, FS_MODEL)
 
             self.sessions.append({"X": X16, "Y": Y})
 

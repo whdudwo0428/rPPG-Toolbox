@@ -1,131 +1,89 @@
 # -*- coding: utf-8 -*-
+"""
+GRU Runner — LSTM 스타일로 통일 (V1.5)
+- CohfaceSeqDataset(subset='train'/'val')
+- train/val 모두 BucketBatchSampler 사용
+- 모델은 현 repo의 SeqRegressor(LSTM 백본) 인터페이스 유지
+"""
 import argparse
-import json
 import os
-import time
+from datetime import datetime
 
-import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from .config import (CACHE_DIR, RUNS_DIR, DEVICE, LR, EPOCHS, BUCKET_BS)
+from .config import RUNS_DIR, DEVICE, LR
 from .data import CohfaceSeqDataset
 from .models import SeqRegressor
-from .train import make_batch, evaluate, train_loop, save_run
+from .sampler import BucketBatchSampler
+from .train import train_loop, evaluate, save_run
 
 
-def parse_bucket(spec: str):
-    mp = {}
-    for tok in (spec or "").split(","):
-        tok = tok.strip()
-        if not tok:
-            continue
-        L, b = tok.split(":")
-        mp[int(L)] = int(b)
-    return mp
-
-
-def build_loaders_by_session(ds, bucket_bs=None, num_workers=0, pin_memory=0, seed=42):
-    rng = np.random.default_rng(seed)
-    windows = list(ds.iter_windows())  # (session_i, a, b, T)
-
-    # 세션별 묶기
-    sess_to_wins = {}
-    for (i, a, b, T) in windows:
-        sess_to_wins.setdefault(i, []).append((i, a, b, T))
-
-    sess_ids = sorted(sess_to_wins.keys())
-    rng.shuffle(sess_ids)
-
-    n = len(sess_ids)
-    ntr = max(1, int(round(n * 0.8)))
-    nv = max(1, int(round(n * 0.1)))
-    tr_ids = set(sess_ids[:ntr])
-    va_ids = set(sess_ids[ntr:ntr + nv])
-    te_ids = set(sess_ids[ntr + nv:])
-
-    def _mk_loaders(id_set):
-        bylen = {}
-        for i in id_set:
-            for it in sess_to_wins[i]:
-                T = it[-1]
-                bylen.setdefault(T, []).append(it)
-
-        bs_map = parse_bucket(bucket_bs)
-        loaders = []
-        for T, group in bylen.items():
-            loaders.append(DataLoader(
-                group,
-                batch_size=bs_map.get(T, 64),
-                shuffle=True,
-                collate_fn=lambda idxs: make_batch(ds, idxs),
-                num_workers=num_workers,
-                pin_memory=bool(pin_memory),
-                persistent_workers=bool(num_workers > 0),
-                prefetch_factor=(4 if num_workers > 0 else None),
-            ))
-        return loaders
-
-    return _mk_loaders(tr_ids), _mk_loaders(va_ids), _mk_loaders(te_ids)
+def parse_bucket_bs(s: str):
+    """
+    "10240:4,5120:8" -> {10240:4, 5120:8}
+    """
+    out = {}
+    for kv in s.split(','):
+        k, v = kv.split(':')
+        out[int(k)] = int(v)
+    return out
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--cache", type=str, default=CACHE_DIR)
-    ap.add_argument("--epochs", type=int, default=EPOCHS)
-    ap.add_argument("--lr", type=float, default=LR)
-    ap.add_argument("--hidden", type=int, default=256)
-    ap.add_argument("--layers", type=int, default=3)
-    ap.add_argument("--bidir", type=int, default=1)  # 양방향 권장
-    ap.add_argument("--dropout", type=float, default=0.1)
-    ap.add_argument("--bucket_bs", type=str, default=BUCKET_BS)
-    ap.add_argument("--num_workers", type=int, default=8)
-    ap.add_argument("--pin_memory", type=int, default=1)
+    ap.add_argument('--cache', required=True)
+    ap.add_argument('--epochs', type=int, default=50)
+    ap.add_argument('--lr', type=float, default=LR)
+    ap.add_argument('--hidden', type=int, default=128)
+    ap.add_argument('--layers', type=int, default=2)
+    ap.add_argument('--bidir', type=int, default=1)
+    ap.add_argument('--dropout', type=float, default=0.1)
+    ap.add_argument('--bucket_bs', type=str, default='10240:4,5120:8')
+    ap.add_argument('--num_workers', type=int, default=8)
+    ap.add_argument('--pin_memory', type=int, default=1)
     args = ap.parse_args()
 
-    ds = CohfaceSeqDataset(args.cache)
+    # Dataset
+    train_set = CohfaceSeqDataset(args.cache, subset='train')
+    val_set = CohfaceSeqDataset(args.cache, subset='val')
 
-    # 세션 기반 분할 + 길이 버킷 로더
-    tr_loaders, val_loaders, te_loaders = build_loaders_by_session(
-        ds,
-        bucket_bs=args.bucket_bs,
+    # Bucket sampler config
+    bucket = parse_bucket_bs(args.bucket_bs)
+
+    train_loader = DataLoader(
+        train_set,
+        batch_sampler=BucketBatchSampler(train_set, bucket, shuffle=True),
         num_workers=args.num_workers,
-        pin_memory=args.pin_memory,
-        seed=42,
+        pin_memory=bool(args.pin_memory),
+    )
+    val_loader = DataLoader(
+        val_set,
+        batch_sampler=BucketBatchSampler(val_set, bucket, shuffle=False),
+        num_workers=args.num_workers,
+        pin_memory=bool(args.pin_memory),
     )
 
-    # Early-Stop: 모든 Val 로더 평균 corr_bestlag
-    vdict = {f"val_{k}": ld for k, ld in enumerate(val_loaders)} or {"val_fallback": tr_loaders[0]}
-
+    # Model (LSTM backbone; interface parity)
     model = SeqRegressor(
-        input_dim=16,
+        in_dim=16,
         hidden=args.hidden,
         layers=args.layers,
-        cell='gru',
         bidir=bool(args.bidir),
-        dropout=args.dropout
+        dropout=args.dropout,
     ).to(DEVICE)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    model = train_loop(model, optimizer, tr_loaders, vdict, epochs=args.epochs)
+    opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
-    def _avg_metrics(loaders):
-        if not loaders:
-            return {}
-        outs = [evaluate(model, ld) for ld in loaders]
-        keys = outs[0].keys()
-        return {k: float(np.mean([o[k] for o in outs])) for k in keys}
+    model = train_loop(model, opt, train_loader, val_loader, epochs=args.epochs, device=DEVICE)
 
-    metrics = {
-        "val": _avg_metrics(val_loaders) if val_loaders else _avg_metrics(tr_loaders),
-        "test": _avg_metrics(te_loaders) if te_loaders else _avg_metrics([tr_loaders[-1]]),
-    }
-    print("[metrics]", json.dumps(metrics, indent=2, ensure_ascii=False))
+    val_metrics = evaluate(model, val_loader)
 
-    tag = time.strftime("%Y%m%d_%H%M%S")
-    run_dir = os.path.join(RUNS_DIR, f"gru_rronly_{tag}")
-    save_run(run_dir, model, metrics)
+    tag = f"gru_rronly_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    run_dir = os.path.join(RUNS_DIR, tag)
+    save_run(run_dir, model, {"val": val_metrics})
+    print("[metrics]", {"val": val_metrics})
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
