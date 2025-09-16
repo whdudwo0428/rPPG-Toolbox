@@ -53,12 +53,12 @@ def _plot_one_session(model, X, G, out_png, fs=FS_MODEL):
     plt.figure(figsize=(10, 3))
     plt.plot(t, G, label="GT", linewidth=1.0)
     plt.plot(t, P_aligned, label="Pred(aligned)", linewidth=1.0)
-    plt.xlabel("Time (s)");
+    plt.xlabel("Time (s)")
     plt.ylabel("RR (a.u.)")
     plt.title(os.path.basename(out_png).replace(".png", ""))
     plt.legend(loc="upper right")
-    plt.tight_layout();
-    plt.savefig(out_png, dpi=150);
+    plt.tight_layout()
+    plt.savefig(out_png, dpi=150)
     plt.close()
 
 
@@ -72,14 +72,14 @@ def main():
     ap.add_argument("--dropout", type=float, default=0.1)
     ap.add_argument("--bucket_bs", type=str, default="10240:4,5120:8")
     ap.add_argument("--num_workers", type=int, default=8)
-    ap.add_argument("--pin_memory", type=int, default=1)
+    ap.add_argument("--num_workers", type=int, default=12)
     ap.add_argument("--n_plots", type=int, default=4)
     ap.add_argument("--outdir", type=str, default="")
     args = ap.parse_args()
 
     out_root = args.outdir or os.path.dirname(args.model) or "."
     os.makedirs(out_root, exist_ok=True)
-    plot_dir = os.path.join(out_root, "plots");
+    plot_dir = os.path.join(out_root, "plots")
     os.makedirs(plot_dir, exist_ok=True)
 
     # Dataset & FULL-window loader
@@ -108,11 +108,11 @@ def main():
     saved = []
     for sid in picks:
         sess = ds.sessions[sid]
-        X = sess["X"];
+        X = sess["X"]
         G = sess["Y"]
         # 중앙 40s(or 20s) 클립
         Tprefer = int(40 * FS_MODEL) if len(G) >= int(40 * FS_MODEL) else int(20 * FS_MODEL)
-        st = max(0, (len(G) - Tprefer) // 2);
+        st = max(0, (len(G) - Tprefer) // 2)
         ed = st + Tprefer
         png = os.path.join(plot_dir, f"test_session{sid:02d}_[{os.path.basename(ds.files[sid])}].png")
         _plot_one_session(model, X[st:ed], G[st:ed], png, fs=FS_MODEL)
