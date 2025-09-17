@@ -105,7 +105,7 @@ class CohfaceSeqDataset(Dataset):
         fs = FS_MODEL
         for w in RR_WIN_LIST:
             T = int(round(w * fs))
-            if L < T:  # ★ 세션이 더 짧으면 해당 윈도우 스킵
+            if L < T:  # 세션이 더 짧으면 해당 윈도우 스킵
                 continue
             stride = int(round(FIXED_STRIDE * fs)) if FIXED_STRIDE is not None else max(1, int(round(
                 w * fs * STRIDE_FRAC)))

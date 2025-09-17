@@ -314,7 +314,7 @@ def learn_global_lag_adaptive():
     tg_u, g_u, _ = resample_uniform(gt_t[mg], gt_resp[mg], fs)
     if tg_u is None:
         return
-    gu = np.interp(tu, tg_u, g_u).astype(np.float32)  # ★ 길이=tu와 정확히 일치
+    gu = np.interp(tu, tg_u, g_u).astype(np.float32)  # 길이=tu와 정확히 일치
     gu = bandpass(zscore(gu), fs, RESP_BAND, RESP_ORDER)
 
     # 길이/유효성 가드
@@ -332,7 +332,7 @@ def learn_global_lag_adaptive():
         return
     from scipy.signal import coherence
     f, Cxy = coherence(su, gu, fs=fs, nperseg=nper, noverlap=nper // 2)
-    Cxy = np.nan_to_num(Cxy, nan=0.0, posinf=0.0, neginf=0.0)  # ★ divide NaN 방지
+    Cxy = np.nan_to_num(Cxy, nan=0.0, posinf=0.0, neginf=0.0)  # divide NaN 방지
     mb = (f >= RR_BAND[0]) & (f <= RR_BAND[1])
     coh_val = float(np.mean(Cxy[mb])) if np.any(mb) else 0.0
 

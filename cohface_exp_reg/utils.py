@@ -2,6 +2,7 @@
 import os
 
 import numpy as np
+import torch
 from scipy.signal import butter, filtfilt, hilbert, welch, find_peaks, sosfiltfilt
 
 from .config import FS_MODEL, BPM_MIN_PROM
@@ -125,6 +126,7 @@ def _subbin_parabolic(fr, p, i0):
     delta = 0.5 * (y1 - y3) / denom  # ∈ [-0.5, 0.5] approx
     return float(fr[i0] + delta * (fr[1] - fr[0]))
 
+
 def welch_psd_rr_bpm(x, fs=FS_MODEL, lo=0.08, hi=0.60, min_prom=BPM_MIN_PROM):
     """
     RR-band Welch PSD → BPM.
@@ -137,7 +139,7 @@ def welch_psd_rr_bpm(x, fs=FS_MODEL, lo=0.08, hi=0.60, min_prom=BPM_MIN_PROM):
         return float('nan')
 
     # 세분화 옵션
-    up = max(1, int(os.getenv("BPM_NFFT_UP", "1")))         # e.g., 1/2/4
+    up = max(1, int(os.getenv("BPM_NFFT_UP", "1")))  # e.g., 1/2/4
     use_subbin = int(os.getenv("BPM_SUBBIN_QUAD", "1")) != 0
     use_fallback = int(os.getenv("BPM_FALLBACK_ARGMAX", "1")) != 0
 
@@ -210,6 +212,54 @@ def corr_soft_bestlag(pred, gt, fs=FS_MODEL, lag_s=0.5, beta=8.0, eps=1e-8):
     corr_soft = float(np.sum(w * ncc))
     lag_exp = float(np.sum(w * lags) / fs)
     return corr_soft, lag_exp
+
+
+def corr_soft_bestlag_torch(pred: torch.Tensor, gt: torch.Tensor, fs: float,
+                            lag_s: float = 2.0, beta: float = 8.0, eps: float = 1e-6):
+    """
+    Differentiable soft-best-lag correlation.
+    pred, gt: [B,T] 또는 [T] (float/half 모두 허용, 내부에서 float32로 연산)
+    반환: (corr_soft:[B], lag_soft:[B, seconds])
+    """
+    if pred.dim() == 1:
+        pred = pred[None, :]
+    if gt.dim() == 1:
+        gt = gt[None, :]
+
+    P = pred.float()
+    G = gt.float()
+
+    # z-normalize
+    P = P - P.mean(dim=1, keepdim=True)
+    P = P / (P.std(dim=1, keepdim=True) + eps)
+    G = G - G.mean(dim=1, keepdim=True)
+    G = G / (G.std(dim=1, keepdim=True) + eps)
+
+    max_lag = int(round(float(lag_s) * float(fs)))
+    if max_lag < 1:
+        C = (P * G).mean(dim=1)
+        return C, torch.zeros_like(C)
+
+    vals = []
+    for l in range(-max_lag, max_lag + 1):
+        if l < 0:
+            x = P[:, :l]
+            y = G[:, -l:]
+        elif l > 0:
+            x = P[:, l:]
+            y = G[:, :-l]
+        else:
+            x, y = P, G
+        c = (x * y).mean(dim=1)  # [B]
+        vals.append(c)
+
+    C = torch.stack(vals, dim=1)  # [B, 2*L+1]
+    Cmax = C.max(dim=1, keepdim=True).values
+    W = torch.softmax(beta * (C - Cmax), dim=1)  # 안정적 softmax
+    corr_soft = (W * C).sum(dim=1)  # [B]
+    lag_idx = torch.arange(-max_lag, max_lag + 1, device=C.device, dtype=C.dtype)
+    lag_soft = (W * lag_idx[None, :]).sum(dim=1) / float(fs)
+    return corr_soft, lag_soft
 
 
 # ---------------- Alignment helpers ----------------

@@ -44,9 +44,9 @@ h5py==3.14.0
     # via
     #   -r requirements.in
     #   mat73
-hf-xet==1.1.9
+hf-xet==1.1.10
     # via huggingface-hub
-huggingface-hub==0.34.4
+huggingface-hub==0.34.6
     # via timm
 idna==3.10
     # via requests
@@ -177,7 +177,7 @@ platformdirs==4.4.0
     # via jupyter-core
 prompt-toolkit==3.0.52
     # via ipython
-protobuf==6.32.0
+protobuf==6.32.1
     # via tensorboardx
 psutil==7.0.0
     # via ipykernel
@@ -187,7 +187,7 @@ pure-eval==0.2.3
     # via stack-data
 pygments==2.19.2
     # via ipython
-pyparsing==3.2.3
+pyparsing==3.2.4
     # via matplotlib
 python-dateutil==2.9.0.post0
     # via
@@ -216,7 +216,7 @@ safetensors==0.6.2
     # via timm
 scikit-image==0.25.2
     # via -r requirements.in
-scikit-learn==1.7.1
+scikit-learn==1.7.2
     # via
     #   -r requirements.in
     #   neurokit2
