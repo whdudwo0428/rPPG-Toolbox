@@ -256,6 +256,12 @@ export PHASE_LAMBDA=0.3
 export LAG_MAX_S=2.0
 export PHASE_BETA=8.0
 
+# ==== (신규) 보조항/클리핑 ====
+export SCALE_LAMBDA=0.05      # |â-1| 가중치 (0.03~0.1 튜닝)
+export ENV_LAMBDA=0.05        # 엔벨로프 L1 가중치 (0.03~0.1 튜닝)
+export ENV_WIN_S=0.75         # RMS 엔벨로프 윈도우(초, 0.5~1.0 권장)
+export GRAD_CLIP_NORM=1.0     # grad clip L2 norm (0.8~2.0 튜닝)
+
 # ==== 윈도우/스트라이드 ====
 export RR_WIN_LIST="20,40"
 export STRIDE_FRAC="0.25"
@@ -280,8 +286,8 @@ export MEDIAPIPE_USE_GPU=1
 export MP_TASK_PATH="$PWD/cohface_exp_reg/assets/pose_landmarker_full.task"
 
 # ==== BPM/컨텍스트 ====
-export BPM_MIN_PROM=3.0              # (필요시 2.0~2.5로 낮추면 유효 창↑)
-export BPM_FALLBACK_ARGMAX=1         # 피크 없을 때 argmax 폴백 사용
+export BPM_MIN_PROM=3.0
+export BPM_FALLBACK_ARGMAX=1
 export SNR_HIT_BPM=2
 export W_TREND_FC=0.05
 ```
