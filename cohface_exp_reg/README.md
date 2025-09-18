@@ -213,8 +213,21 @@ export ENV_WIN_S=0.50
 export GRAD_CLIP_NORM=2.0
 export VAR_LAMBDA=0.05
 
-export SNR_CH_IDX=13             # snr_rr_hint
-export SNR_KAPPA=0.30
+# --- SNR 가중(창별 신뢰도) ---
+export SNR_CH_IDX=13             # 입력 16채널 중 SNR 힌트 채널(창 내 상수)
+export SNR_KAPPA=0.30            # 가중 강도: w=(1-κ)+κ·h ; κ↑→가중 차 커짐
+export SNR_KAPPA_WARMUP=5        # (선택) 초기 5epoch 동안 κ 선형 워밍업(0이면 끔)
+export SNR_WMIN=0.60             # 가중 하한(너무 나쁜 창도 최소 반영)
+export SNR_WMAX=0.98             # 가중 상한(너무 좋은 창 과우대 방지)
+export SNR_GAMMA=1.2             # h 비선형(>1이면 상단 눌러 포화 방지)
+
+# --- SNR 힌트 산출 방식(데이터로더에서 창별 계산) ---
+export SNR_MODE=crest            # crest | flat | topk  (기본: crest)
+export SNR_CREST_LO=2.0          # crest 매핑 하한(나쁜 창 기준)
+export SNR_CREST_HI=12.0         # crest 매핑 상한(아주 좋은 창 기준)
+export SNR_TOPK_K=4              # SNR_MODE=topk일 때 상위 k 피크 사용
+export SNR_SRC=w                 # SNR 소스: w|y|d|mix (기본 w=가로폭 채널, mix=0/1/2 평균)
+
 
 # 윈도우/스트라이드
 export RR_WIN_LIST="20,40"
@@ -283,7 +296,7 @@ export BPM_NFFT_UP=4
 
 python -m cohface_exp_reg.run_eval_best \
   --cache cohface_exp_reg/cache_cohface_feats \
-  --model "cohface_exp_reg/runs/lstm_rronly_20250918_104319/best_model.pt" \
+  --model "cohface_exp_reg/runs/lstm_rronly_20250918_133109/best_model.pt" \
   --hidden 128 --layers 2 --bidir 1 --dropout 0.1 \
   --num_workers 12 --pin_memory 1 --n_plots 4 \
   --vis_norm minmax01

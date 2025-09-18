@@ -29,6 +29,11 @@ VAR_LAMBDA = float(os.getenv("VAR_LAMBDA", "0.02"))  # |log(std(P)/std(G))| 가�
 SNR_CH_IDX = int(os.getenv("SNR_CH_IDX", "13"))  # 16ch 중 snr_rr_hint (0-based)
 SNR_KAPPA = float(os.getenv("SNR_KAPPA", "0.30"))  # κ∈[0,1], weight = (1-κ)+κ*h
 SNR_GAMMA = float(os.getenv("SNR_GAMMA", "1.0"))  # 비선형 강화: h^γ
+SNR_WMIN = float(os.getenv("SNR_WMIN", "0.60"))  # 가중 하한
+SNR_WMAX = float(os.getenv("SNR_WMAX", "0.99"))  # 가중 상한
+
+SNR_KAPPA_WARMUP = int(os.getenv("SNR_KAPPA_WARMUP", "0"))  # 0이면 워밍업 없음
+H_MEAN_LOG = int(os.getenv("H_MEAN_LOG", "1"))  # 1이면 h 통계 로깅
 
 # AMP grad clipping
 GRAD_CLIP_NORM = float(os.getenv("GRAD_CLIP_NORM", "1.0"))
@@ -201,6 +206,7 @@ def evaluate(model, loader, fs=FS_MODEL):
             "NFFT_UP": BPM_NFFT_UP,
         },
     }
+    out["corr_gap"] = float(out["corr_bestlag"] - out["corr"])
     return out
 
 
@@ -244,6 +250,8 @@ def train_loop(model, optimizer, train_loaders, val_loaders, epochs=EPOCHS, devi
 
         # 로깅 누적
         a_hat_acc, var_ratio_acc, snr_w_acc = 0.0, 0.0, 0.0
+        h_mean_acc, h_std_acc = 0.0, 0.0
+        snr_w_min_ep, snr_w_max_ep = 1e9, -1e9
         batch_count, clip_events = 0, 0
 
         # -------------------- Train --------------------
@@ -253,10 +261,18 @@ def train_loop(model, optimizer, train_loaders, val_loaders, epochs=EPOCHS, devi
                 Y = Y.to(device).float()
                 optimizer.zero_grad(set_to_none=True)
 
-                # 창별 SNR 힌트(0~1) → 저 SNR일수록 weight 낮춤: w = (1-κ) + κ*h
-                h_win = torch.clamp(X[:, :, SNR_CH_IDX].mean(dim=1), 0.0, 1.0)  # [B]
-                h_eff = torch.pow(h_win, SNR_GAMMA)  # 비선형 옵션
-                w_snr = (1.0 - SNR_KAPPA) + SNR_KAPPA * h_eff  # [B]
+                # 창별 SNR 힌트 : [B]
+                h_win = torch.clamp(X[:, :, SNR_CH_IDX].mean(dim=1), 0.0, 1.0)
+                h_eff = torch.pow(h_win, SNR_GAMMA)
+
+                # κ 워밍업: ep가 커질수록 가중 차별화↑
+                if SNR_KAPPA_WARMUP and SNR_KAPPA_WARMUP > 0:
+                    kappa_eff = SNR_KAPPA * min(1.0, ep / float(SNR_KAPPA_WARMUP))
+                else:
+                    kappa_eff = SNR_KAPPA
+
+                w_snr = (1.0 - kappa_eff) + kappa_eff * h_eff
+                w_snr = torch.clamp(w_snr, SNR_WMIN, SNR_WMAX)
 
                 if LOSS_MODE == 'phase':
                     # FFT 기반 손실은 fp16에서 불안정 → autocast 비활성 (fp32)
@@ -336,6 +352,11 @@ def train_loop(model, optimizer, train_loaders, val_loaders, epochs=EPOCHS, devi
                 if torch.is_tensor(var_ratio):
                     var_ratio_acc += float(torch.nanmean(var_ratio).detach().cpu())
                 snr_w_acc += float(w_snr.mean().detach().cpu())
+                snr_w_min_ep = min(snr_w_min_ep, float(w_snr.min().detach().cpu()))
+                snr_w_max_ep = max(snr_w_max_ep, float(w_snr.max().detach().cpu()))
+                if H_MEAN_LOG:
+                    h_mean_acc += float(h_win.mean().detach().cpu())
+                    h_std_acc += float(h_win.std(correction=0).detach().cpu())
                 batch_count += 1
 
         # -------------------- Validate --------------------
@@ -368,8 +389,11 @@ def train_loop(model, optimizer, train_loaders, val_loaders, epochs=EPOCHS, devi
               f"train_total={np.mean(loss_tot_list):.6e} | "
               f"a_hat_mean={a_hat_acc / max(1, batch_count):.3f} | "
               f"var_ratio_mean={var_ratio_acc / max(1, batch_count):.3f} | "
-              f"snr_weight_mean={snr_w_acc / max(1, batch_count):.3f} | "
-              f"clip_rate={clip_rate:.1f}% | "
+              f"snr_weight_mean={snr_w_acc / max(1, batch_count):.3f} "
+              f"(min={snr_w_min_ep:.2f}, max={snr_w_max_ep:.2f}, "
+              f"kappa_eff={(SNR_KAPPA * min(1.0, ep / float(SNR_KAPPA_WARMUP)) if SNR_KAPPA_WARMUP else SNR_KAPPA):.2f}) | "
+              f"{('h_mean=%.3f | h_std=%.3f | ' % (h_mean_acc / max(1, batch_count), h_std_acc / max(1, batch_count))) if H_MEAN_LOG else ''}"
+              f"clip_rate={(clip_events / max(1, batch_count)) * 100.0:.1f}% | "
               f"val_avg_corr_bestlag={val_avg.get('corr_bestlag', float('nan')):.6f}")
 
         # Early stop 기준: corr_bestlag

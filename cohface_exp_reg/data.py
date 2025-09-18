@@ -34,6 +34,120 @@ def _safe_norm(num: np.ndarray, denom: np.ndarray, base: float, floor_frac: floa
     return y.astype(np.float32)
 
 
+# --- SNR hint helpers (window-level) ---
+def _snr_crest(x: np.ndarray, fs: float) -> float:
+    """RR 밴드(0.08–0.60Hz) PSD의 crest(peak/median)를 0~1로 매핑."""
+    x = np.asarray(x, dtype=np.float32)
+    if x.size < 8 or not np.all(np.isfinite(x)):
+        return 0.0
+    n = int(2 ** np.ceil(np.log2(max(64, x.size * 4))))
+    p = np.abs(np.fft.rfft(x, n=n)) ** 2
+    lo = int(np.floor(0.08 / fs * n));
+    hi = int(np.ceil(0.60 / fs * n))
+    band = p[max(1, lo): max(hi, lo + 2)]
+    if band.size == 0 or not np.all(np.isfinite(band)):
+        return 0.0
+    crest = float(band.max()) / (float(np.median(band)) + 1e-8)  # ≥1
+    C0 = float(os.getenv("SNR_CREST_LO", "2.0"))
+    C1 = float(os.getenv("SNR_CREST_HI", "12.0"))
+    h = (np.log(crest) - np.log(C0)) / (np.log(C1) - np.log(C0))
+    return float(np.clip(h, 0.0, 1.0))
+
+
+def _snr_flatness(x: np.ndarray, fs: float) -> float:
+    """Spectral Flatness 기반 (1 - SFM). 평탄할수록 0, 톤일수록 1."""
+    x = np.asarray(x, dtype=np.float32)
+    if x.size < 8 or not np.all(np.isfinite(x)):
+        return 0.0
+    n = int(2 ** np.ceil(np.log2(max(64, x.size * 4))))
+    p = np.abs(np.fft.rfft(x, n=n)) ** 2 + 1e-12
+    lo = int(np.floor(0.08 / fs * n));
+    hi = int(np.ceil(0.60 / fs * n))
+    band = p[max(1, lo): max(hi, lo + 2)]
+    if band.size == 0:
+        return 0.0
+    gm = np.exp(np.mean(np.log(band)));
+    am = float(np.mean(band))
+    sfm = gm / am
+    return float(np.clip(1.0 - sfm, 0.0, 1.0))
+
+
+def _snr_topk(x: np.ndarray, fs: float) -> float:
+    """Top-k 피크 품질: 최고 피크/(상위 k 평균)을 0~1로 스케일."""
+    x = np.asarray(x, dtype=np.float32)
+    if x.size < 8 or not np.all(np.isfinite(x)):
+        return 0.0
+    n = int(2 ** np.ceil(np.log2(max(64, x.size * 4))))
+    p = np.abs(np.fft.rfft(x, n=n)) ** 2
+    lo = int(np.floor(0.08 / fs * n));
+    hi = int(np.ceil(0.60 / fs * n))
+    band = p[max(1, lo): max(hi, lo + 2)]
+    if band.size < 4:
+        return 0.0
+    k = int(os.getenv("SNR_TOPK_K", "4"))
+    top = np.sort(band)[-k:]
+    ratio = float(top[-1] / (np.mean(top) + 1e-8))  # ≥1
+    return float(np.clip((ratio - 1.0) / 1.0, 0.0, 1.0))
+
+
+def _snr_hint_from_signal(x_rr: np.ndarray, fs: float) -> float:
+    """환경변수 SNR_MODE=crest|flat|topk."""
+    mode = os.getenv("SNR_MODE", "crest").lower()
+    if mode == "flat":  return _snr_flatness(x_rr, fs)
+    if mode == "topk":  return _snr_topk(x_rr, fs)
+    return _snr_crest(x_rr, fs)  # default
+
+
+def _snr_hint_window(X_win: np.ndarray, fs: float) -> float:
+    """
+    윈도우 X_win[:, ch]에서 SNR 소스를 선택.
+    SNR_SRC = w|y|d|mix (기본: w). mix는 [0,1,2] 평균.
+    """
+    src = os.getenv("SNR_SRC", "w").lower()
+    ch = 0 if src == "w" else (1 if src == "y" else (2 if src == "d" else None))
+    if ch is None:  # mix
+        vals = []
+        for c in (0, 1, 2):
+            vals.append(_snr_hint_from_signal(X_win[:, c], fs))
+        return float(np.mean(vals))
+    return _snr_hint_from_signal(X_win[:, ch], fs)
+
+
+# --- end SNR helpers ---
+
+
+def _snr_rr_from_rrsig(x_rr: np.ndarray, fs: float) -> float:
+    """
+    RR 밴드(0.08–0.60Hz) 내 스펙트럼 '크레스트(peak/median)'를 0~1로 매핑.
+    - 좋은 신호: 피크가 또렷 → crest↑ → h≈1
+    - 나쁜 신호: 평탄/잡음 → crest↓ → h≈0
+    """
+    x = np.asarray(x_rr, dtype=np.float32)
+    if x.size < 8 or not np.all(np.isfinite(x)):
+        return 0.0
+
+    # NFFT 업샘플(부드러운 스펙트럼)
+    n = int(2 ** np.ceil(np.log2(max(64, x.size * 4))))
+    p = np.abs(np.fft.rfft(x, n=n)) ** 2
+
+    # RR 밴드 제한
+    lo = int(np.floor(0.08 / fs * n))
+    hi = int(np.ceil(0.60 / fs * n))
+    band = p[max(1, lo): max(hi, lo + 2)]
+    if band.size == 0 or not np.all(np.isfinite(band)):
+        return 0.0
+
+    pmax = float(band.max())
+    pmed = float(np.median(band)) + 1e-8
+    crest = pmax / pmed  # ≥1
+
+    # 로그-선형 매핑(환경변수로 조정 가능)
+    C0 = float(os.getenv("SNR_CREST_LO", "2.0"))  # 낮은 문턱(≈잡음)
+    C1 = float(os.getenv("SNR_CREST_HI", "12.0"))  # 높은 문턱(또렷)
+    h = (np.log(crest) - np.log(C0)) / (np.log(C1) - np.log(C0))
+    return float(np.clip(h, 0.0, 1.0))
+
+
 class CohfaceSeqDataset(Dataset):
     """Build 16-ch RR-only features from cached npz files and provide sliding windows."""
 
@@ -63,12 +177,26 @@ class CohfaceSeqDataset(Dataset):
         files = pool
         keys = [_split_key(p) for p in files]
         uniq = sorted(set(keys))
-        uniq_train = [k for i, k in enumerate(uniq) if i % 5 not in (3, 4)]  # 60%
-        uniq_val = [k for i, k in enumerate(uniq) if i % 5 == 3]  # 20%
-        uniq_test = [k for i, k in enumerate(uniq) if i % 5 == 4]  # 20%
 
-        def _sel(ks):
-            return [p for p, k in zip(files, keys) if k in ks]
+        # SUBJECT_WISE_SPLIT=1 이면 subject 기준(세션 무시)으로 분할
+        USE_SUBJECT_WISE = int(os.getenv("SUBJECT_WISE_SPLIT", "0")) != 0
+        if USE_SUBJECT_WISE:
+            subj_keys = [k // 10 for k in keys]  # 10*subject + session → subject 추출
+            uniq_subj = sorted(set(subj_keys))
+            uniq_train = [s for i, s in enumerate(uniq_subj) if i % 5 not in (3, 4)]  # 60%
+            uniq_val = [s for i, s in enumerate(uniq_subj) if i % 5 == 3]  # 20%
+            uniq_test = [s for i, s in enumerate(uniq_subj) if i % 5 == 4]  # 20%
+
+            def _sel(ks):
+                return [p for p, s in zip(files, subj_keys) if s in ks]
+        else:
+            # 기존: subject와 session을 묶은 키(10*sub+sess)로 분할
+            uniq_train = [k for i, k in enumerate(uniq) if i % 5 not in (3, 4)]
+            uniq_val = [k for i, k in enumerate(uniq) if i % 5 == 3]
+            uniq_test = [k for i, k in enumerate(uniq) if i % 5 == 4]
+
+            def _sel(ks):
+                return [p for p, k in zip(files, keys) if k in ks]
 
         if subset == "train":
             files = _sel(uniq_train)
@@ -103,7 +231,7 @@ class CohfaceSeqDataset(Dataset):
             y_n = _safe_norm(dY, Wslow, base=W0, floor_frac=floor_frac)
             d_n = _safe_norm(dD, Wslow, base=W0, floor_frac=floor_frac)
             # derivative of dW (centered), then robustify
-            dw = np.gradient(dW).astype(np.float32) / (W0 + 1e-6)
+            dw = np.gradient(dW, 1.0 / FS_MODEL).astype(np.float32) / (W0 + 1e-6)
             dw = robust_clip(dw)
 
             # Optional pre-alignment of RESP against y_n
@@ -186,8 +314,26 @@ class CohfaceSeqDataset(Dataset):
 
     def __getitem__(self, i: int):
         sid, st, T = self.idxs[i]
-        X = self.sessions[sid]["X"][st:st + T]  # [T,16]
+
+        # 윈도우 복사(세션 캐시 오염 방지)
+        X = self.sessions[sid]["X"][st:st + T].copy()  # [T,16]
         Y = self.sessions[sid]["Y"][st:st + T]  # [T]
+
+        # 채널 규약: 0=w_rr, 1=y_rr, 2=d_rr, 13=snr_rr_hint, 14=corr_hint_wy, 15=corr_hint_wd
+        try:
+            snr_win = _snr_hint_window(X, FS_MODEL)
+        except Exception:
+            snr_win = 0.0
+        X[:, 13] = np.float32(snr_win)
+
+        if T > 8 and np.all(np.isfinite(X[:, 0])) and np.all(np.isfinite(X[:, 1])) and np.all(np.isfinite(X[:, 2])):
+            cw = float(abs(np.corrcoef(X[:, 0], X[:, 1])[0, 1]))
+            cd = float(abs(np.corrcoef(X[:, 0], X[:, 2])[0, 1]))
+        else:
+            cw = cd = 0.0
+        X[:, 14] = np.float32(cw)
+        X[:, 15] = np.float32(cd)
+
         X = torch.from_numpy(X)  # [T,16]
         Y = torch.from_numpy(Y).unsqueeze(-1)  # [T,1]
         return X, Y
