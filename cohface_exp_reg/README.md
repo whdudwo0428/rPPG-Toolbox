@@ -207,11 +207,11 @@ export LAG_MAX_S=1.5
 export PHASE_BETA=10.0
 
 # 보조항/클리핑 (신규)
-export SCALE_LAMBDA=0.12         # 0.12~0.15 탐색
+export SCALE_LAMBDA=0.15         # 0.12~0.15 탐색
 export ENV_LAMBDA=0.06
 export ENV_WIN_S=0.50
-export GRAD_CLIP_NORM=1.0
-export VAR_LAMBDA=0.03    
+export GRAD_CLIP_NORM=2.0
+export VAR_LAMBDA=0.05
 
 export SNR_CH_IDX=13             # snr_rr_hint
 export SNR_KAPPA=0.30
@@ -268,7 +268,7 @@ python -m cohface_exp_reg.run_extract_all \
 ```bash
 python -m cohface_exp_reg.run_train_lstm \
   --cache cohface_exp_reg/cache_cohface_feats \
-  --epochs 50 --lr 1e-3 \
+  --epochs 50 --lr 5e-4 \
   --hidden 128 --layers 2 --bidir 1 --dropout 0.1 \
   --num_workers 12 --pin_memory 1
 ```
@@ -283,7 +283,7 @@ export BPM_NFFT_UP=4
 
 python -m cohface_exp_reg.run_eval_best \
   --cache cohface_exp_reg/cache_cohface_feats \
-  --model "cohface_exp_reg/runs/lstm_rronly_20250918_094730/best_model.pt" \
+  --model "cohface_exp_reg/runs/lstm_rronly_20250918_104319/best_model.pt" \
   --hidden 128 --layers 2 --bidir 1 --dropout 0.1 \
   --num_workers 12 --pin_memory 1 --n_plots 4 \
   --vis_norm minmax01
