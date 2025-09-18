@@ -296,7 +296,7 @@ export BPM_NFFT_UP=4
 
 python -m cohface_exp_reg.run_eval_best \
   --cache cohface_exp_reg/cache_cohface_feats \
-  --model "cohface_exp_reg/runs/lstm_rronly_20250918_133109/best_model.pt" \
+  --model "cohface_exp_reg/runs/lstm_rronly_20250918_135929/best_model.pt" \
   --hidden 128 --layers 2 --bidir 1 --dropout 0.1 \
   --num_workers 12 --pin_memory 1 --n_plots 4 \
   --vis_norm minmax01
