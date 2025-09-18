@@ -18,7 +18,7 @@ from .data import CohfaceSeqDataset
 from .models import SeqRegressor
 from .sampler import BucketBatchSampler
 from .train import evaluate
-from .utils import align_scale_np
+from .utils import align_scale_np, _minmax01, _minmax11
 
 
 def parse_bucket_bs(s: str):
@@ -44,15 +44,22 @@ def _pick_sessions(ds, n=4):
     return picks
 
 
-def _plot_one_session(model, X, G, out_png, fs=FS_MODEL):
+def _plot_one_session(model, X, G, out_png, fs=FS_MODEL, vis_norm: str = "none"):
     with torch.no_grad():
         P = model(torch.from_numpy(X).unsqueeze(0).to(DEVICE).float())  # [1,T,1]
         P = P.squeeze(0).squeeze(-1).detach().cpu().numpy().astype(np.float32)
+
     P_aligned, _a = align_scale_np(P, G)
+
+    # 플롯 전용 정규화 (지표에는 영향 없음)
+    Gb = _apply_vis_norm(G, vis_norm)
+    Pb = _apply_vis_norm(P_aligned, vis_norm)
+
     t = np.arange(len(G)) / float(fs)
     plt.figure(figsize=(10, 3))
-    plt.plot(t, G, label="GT", linewidth=1.0)
-    plt.plot(t, P_aligned, label="Pred(aligned)", linewidth=1.0)
+    plt.plot(t, Gb, label=("GT" if vis_norm == "none" else f"GT({vis_norm})"), linewidth=1.0)
+    plt.plot(t, Pb, label=("Pred(aligned)" if vis_norm == "none" else f"Pred(aligned,{vis_norm})"),
+             linewidth=1.0)
     plt.xlabel("Time (s)")
     plt.ylabel("RR (a.u.)")
     plt.title(os.path.basename(out_png).replace(".png", ""))
@@ -60,6 +67,33 @@ def _plot_one_session(model, X, G, out_png, fs=FS_MODEL):
     plt.tight_layout()
     plt.savefig(out_png, dpi=150)
     plt.close()
+
+
+def _zscore_np(x, eps=1e-8):
+    x = x.astype(np.float32)
+    return (x - x.mean()) / (x.std() + eps)
+
+
+def _apply_vis_norm(arr: np.ndarray, mode: str) -> np.ndarray:
+    """플롯용 정규화(지표에는 영향 없음)"""
+    if mode == "none":
+        return arr
+    if mode == "zscore":
+        return _zscore_np(arr)
+    if mode == "minmax01":
+        if _minmax01 is not None:
+            return _minmax01(arr)
+        # 안전 폴백
+        lo, hi = float(np.min(arr)), float(np.max(arr))
+        return (arr - lo) / max(hi - lo, 1e-8)
+    if mode == "minmax11":
+        if _minmax11 is not None:
+            return _minmax11(arr)
+        # 안전 폴백: [0,1] → [-1,1]
+        lo, hi = float(np.min(arr)), float(np.max(arr))
+        y = (arr - lo) / max(hi - lo, 1e-8)
+        return y * 2.0 - 1.0
+    return arr
 
 
 def main():
@@ -75,6 +109,9 @@ def main():
     ap.add_argument("--pin_memory", type=int, default=1)
     ap.add_argument("--n_plots", type=int, default=4)
     ap.add_argument("--outdir", type=str, default="")
+    ap.add_argument("--vis_norm", type=str, default="none",
+                    choices=["none", "minmax01", "minmax11", "zscore"],
+                    help="플롯용 정규화(지표 계산에는 영향 없음)")
     args = ap.parse_args()
 
     out_root = args.outdir or os.path.dirname(args.model) or "."
@@ -115,7 +152,7 @@ def main():
         st = max(0, (len(G) - Tprefer) // 2)
         ed = st + Tprefer
         png = os.path.join(plot_dir, f"test_session{sid:02d}_[{os.path.basename(ds.files[sid])}].png")
-        _plot_one_session(model, X[st:ed], G[st:ed], png, fs=FS_MODEL)
+        _plot_one_session(model, X[st:ed], G[st:ed], png, fs=FS_MODEL, vis_norm=args.vis_norm)
         saved.append(png)
     # === 하나의 JSON으로 합치기 ===
     combined = dict(m_test)

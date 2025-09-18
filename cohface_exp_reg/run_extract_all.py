@@ -169,7 +169,7 @@ def _dispatch_preprocess(root: str, s: int, k: int, v: str, h: str,
                        "extract_and_cache(root, subject, session, out[, fs, resp_band])")
 
 
-# -------------------------- 메인 -------------------------- #
+# -------------------------- 메인 --------------------------
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", type=str, default=DATA_ROOT)

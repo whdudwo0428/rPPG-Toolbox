@@ -18,11 +18,26 @@ from .utils import (
     align_scale_np, corr_soft_bestlag_torch
 )
 
-# ---- New: 보조항/클리핑 하이퍼파라미터 ----
-SCALE_LAMBDA    = float(os.getenv("SCALE_LAMBDA", "0.05"))  # 스케일 패널티 가중치
-ENV_LAMBDA      = float(os.getenv("ENV_LAMBDA",   "0.05"))  # 엔벨로프 MSE 가중치
-ENV_WIN_S       = float(os.getenv("ENV_WIN_S",    "0.75"))  # RMS 엔벨로프 윈도우(초)
-GRAD_CLIP_NORM  = float(os.getenv("GRAD_CLIP_NORM", "1.0"))  # 클리핑 노름
+# ====================================================================================================
+# === Loss auxiliaries & eval/unify (env overridable) ===
+SCALE_LAMBDA = float(os.getenv("SCALE_LAMBDA", "0.10"))  # |â-1| 가중치
+ENV_LAMBDA = float(os.getenv("ENV_LAMBDA", "0.06"))  # L1(envP,envG) 가중치
+ENV_WIN_S = float(os.getenv("ENV_WIN_S", "0.50"))  # RMS envelope window (sec)
+VAR_LAMBDA = float(os.getenv("VAR_LAMBDA", "0.02"))  # |log(std(P)/std(G))| 가중치
+
+# SNR-weighted loss (저 SNR일수록 가중 완화)
+SNR_CH_IDX = int(os.getenv("SNR_CH_IDX", "13"))  # 16ch 중 snr_rr_hint (0-based)
+SNR_KAPPA = float(os.getenv("SNR_KAPPA", "0.30"))  # κ∈[0,1], weight = (1-κ)+κ*h
+SNR_GAMMA = float(os.getenv("SNR_GAMMA", "1.0"))  # 비선형 강화: h^γ
+
+# AMP grad clipping
+GRAD_CLIP_NORM = float(os.getenv("GRAD_CLIP_NORM", "1.0"))
+
+# Welch-BPM 옵션 (학습 평가에서도 run_eval_best와 통일)
+BPM_FALLBACK_ARGMAX = int(os.getenv("BPM_FALLBACK_ARGMAX", "1"))
+BPM_SUBBIN_QUAD = int(os.getenv("BPM_SUBBIN_QUAD", "1"))
+BPM_NFFT_UP = int(os.getenv("BPM_NFFT_UP", "4"))
+
 
 # ----------------------- Collate: make_batch -----------------------
 def make_batch(ds, idxs):
@@ -41,15 +56,17 @@ def make_batch(ds, idxs):
     Y = torch.stack(Ys, 0).to(torch.float32)
     return X, Y
 
-# ----------------------- Aux losses -------------------------------
+
+# ----------------------- Aux losses (vectorized per-sample) -------------------------------
 def _next_pow2(n: int) -> int:
     if n <= 1:
         return 1
     return 1 << (n - 1).bit_length()
 
+
 def phase_loss_spectral(pred, gold, fs, band=(0.08, 0.60), eps=1e-8, pad_pow2=True):
     """
-    Spectral phase alignment loss:
+    Spectral phase alignment loss (batch scalar):
       L = 1 - Σ_k w_k * cos(Δφ_k),  w_k ∝ |X_k|·|Y_k| (normalized in band)
     pred, gold: [B,T,1] or [B,T]
     """
@@ -79,51 +96,58 @@ def phase_loss_spectral(pred, gold, fs, band=(0.08, 0.60), eps=1e-8, pad_pow2=Tr
         loss = 1.0 - torch.sum(W * torch.cos(dphi), dim=1)
         return loss.mean()
 
-def _si_mse(pred, gold, eps=1e-6):
-    p = pred; g = gold
-    den = torch.sum(p * p, dim=1, keepdim=True) + eps
-    num = torch.sum(p * g, dim=1, keepdim=True)
-    a_hat = num / den
-    p_aligned = a_hat * p
-    return torch.mean((p_aligned - g) ** 2)
 
-def _mse_z(pred, gold):
-    p = pred - pred.mean(dim=1, keepdim=True)
-    p = p / (p.std(dim=1, keepdim=True) + 1e-6)
-    g = gold - gold.mean(dim=1, keepdim=True)
-    g = g / (g.std(dim=1, keepdim=True) + 1e-6)
-    return torch.mean((p - g) ** 2)
+def _mse_z_vec(pred: torch.Tensor, gold: torch.Tensor, eps: float = 1e-6):
+    """per-sample z-MSE → [B]"""
+    P = (pred - pred.mean(dim=1, keepdim=True)) / (pred.std(dim=1, keepdim=True) + eps)
+    G = (gold - gold.mean(dim=1, keepdim=True)) / (gold.std(dim=1, keepdim=True) + eps)
+    return ((P - G) ** 2).mean(dim=1)
 
-def _scale_penalty(pred, gold, eps=1e-6, p=1):
-    """
-    a_hat = argmin_a ||a·pred - gold||^2  →  a_hat = <p,g>/<p,p>
-    반환: L_scale = |a_hat-1| 의 (평균) (p=1: L1, p=2: L2), a_hat
-    """
-    den = torch.sum(pred * pred, dim=1, keepdim=True) + eps
-    num = torch.sum(pred * gold, dim=1, keepdim=True)
-    a_hat = num / den
-    if p == 1:
-        loss_scale = (a_hat - 1.0).abs().mean()
-    else:
-        loss_scale = ((a_hat - 1.0) ** 2).mean()
-    return loss_scale, a_hat
 
-def _rms_envelope(x, win_samples: int):
-    """
-    RMS 엔벨로프: sqrt( avgpool1d(x^2, k=win) )
-    x: [B,T]
-    """
+def _scale_penalty_vec(pred: torch.Tensor, gold: torch.Tensor, eps: float = 1e-6, p: int = 1):
+    """|â-1| per-sample → ([B], â:[B])"""
+    den = (pred * pred).sum(dim=1) + eps
+    num = (pred * gold).sum(dim=1)
+    a_hat = num / den  # [B]
+    loss = (a_hat - 1.0).abs() if p == 1 else (a_hat - 1.0).pow(2)
+    return loss, a_hat
+
+
+def _rms_envelope(x: torch.Tensor, win_samples: int):
+    """RMS envelope → [B,T]"""
     k = max(3, int(win_samples))
     x2 = (x.unsqueeze(1) ** 2)  # [B,1,T]
     env = torch.sqrt(F.avg_pool1d(x2, kernel_size=k, stride=1, padding=k // 2) + 1e-8)
     return env.squeeze(1)  # [B,T]
 
 
+def _env_l1_vec(pred: torch.Tensor, gold: torch.Tensor, fs: float, win_s: float):
+    """L1(envP, envG) per-sample → [B]"""
+    env_win = max(3, int(win_s * fs))
+    envP, envG = _rms_envelope(pred, env_win), _rms_envelope(gold, env_win)
+    return torch.mean(torch.abs(envP - envG), dim=1)
+
+
+def _var_penalty_vec(pred: torch.Tensor, gold: torch.Tensor, eps: float = 1e-6, p: int = 1):
+    """|log(std(P)/std(G))| per-sample → ([B], ratio:[B])"""
+    std_p = pred.std(dim=1) + eps
+    std_g = gold.std(dim=1) + eps
+    ratio = std_p / std_g
+    log_r = torch.log(ratio)
+    loss = log_r.abs() if p == 1 else (log_r ** 2)
+    return loss, ratio
+
+
 # ----------------------- Evaluation -------------------------------
 @torch.no_grad()
 def evaluate(model, loader, fs=FS_MODEL):
+    """학습 중/종료 후 내부 평가. Welch 옵션은 환경변수에서 통일 적용."""
+    # Welch 옵션 통일(함수 내부에서 env를 읽으므로, 안전하게 동일값 강제)
+    os.environ["BPM_FALLBACK_ARGMAX"] = str(BPM_FALLBACK_ARGMAX)
+    os.environ["BPM_SUBBIN_QUAD"] = str(BPM_SUBBIN_QUAD)
+    os.environ["BPM_NFFT_UP"] = str(BPM_NFFT_UP)
+
     model.eval()
-    # loader는 단일 DataLoader 또는 [DataLoader, ...]일 수 있음 → 단일로 정규화
     loaders = loader if isinstance(loader, (list, tuple)) else [loader]
 
     mse_list, mae_list, corr_vals, corr_bl_vals = [], [], [], []
@@ -133,8 +157,7 @@ def evaluate(model, loader, fs=FS_MODEL):
         for X, Y in ld:
             X = X.to(DEVICE).float()
             Y = Y.to(DEVICE).float()
-            P = model(X)  # [B,T,1]
-            P = P.squeeze(-1)
+            P = model(X).squeeze(-1)  # [B,T]
             G = Y.squeeze(-1)
             B, T = P.shape
             for b in range(B):
@@ -150,7 +173,7 @@ def evaluate(model, loader, fs=FS_MODEL):
                 if not np.isfinite(c):
                     c = 0.0
                 corr_vals.append(float(c))
-                c2, _lag = corr_soft_bestlag(pb_aligned, gb, fs=fs, lag_s=LAG_MAX_S, beta=PHASE_BETA)
+                c2, _ = corr_soft_bestlag(pb_aligned, gb, fs=fs, lag_s=LAG_MAX_S, beta=PHASE_BETA)
                 corr_bl_vals.append(float(c2))
                 # BPM
                 pbpm = welch_psd_rr_bpm(pb_aligned, fs)
@@ -160,9 +183,7 @@ def evaluate(model, loader, fs=FS_MODEL):
                     hit_vals.append(float(abs(pbpm - gbpm) <= SNR_HIT_BPM))
                     valid_bpm += 1
 
-    def _m(x):
-        return float(np.mean(x)) if len(x) else float("nan")
-
+    _m = (lambda x: float(np.mean(x)) if len(x) else float("nan"))
     out = {
         "mse": _m(mse_list),
         "mae": _m(mae_list),
@@ -173,8 +194,15 @@ def evaluate(model, loader, fs=FS_MODEL):
         "scale_a_hat_mean": _m(a_hats),
         "valid_bpm_windows": int(valid_bpm),
         "num_windows_scored": int(len(mse_list)),
+        # 편의상, 사용된 Welch 옵션도 기록
+        "bpm_opts": {
+            "FALLBACK_ARGMAX": BPM_FALLBACK_ARGMAX,
+            "SUBBIN_QUAD": BPM_SUBBIN_QUAD,
+            "NFFT_UP": BPM_NFFT_UP,
+        },
     }
     return out
+
 
 # ----------------------- Train loop -------------------------------
 def _normalize_train_val_inputs(train_loaders, val_loaders):
@@ -194,10 +222,12 @@ def _normalize_train_val_inputs(train_loaders, val_loaders):
         v_dict = {"val": val_loaders}
     return t_list, v_dict
 
+
 def train_loop(model, optimizer, train_loaders, val_loaders, epochs=EPOCHS, device=DEVICE):
     """
-    - 'corr' : loss = z-MSE + λ * (1 - corr_soft_bestlag_torch)
-    - 'phase': loss = SI-MSE + λ * spectral phase loss  (fp32 권장)
+    - 'corr' : loss = z-MSE + λ * (1 - corr_soft_bestlag_torch) + α*|â-1| + γ*L1(env) + δ*|log(stdP/stdG)|
+               (모두 per-sample로 계산 후 SNR 가중 적용)
+    - 'phase': loss = SI-MSE + λ * spectral phase loss (+ 선택: env/var)
     - early-stop: val.corr_bestlag 기준
     """
 
@@ -212,6 +242,10 @@ def train_loop(model, optimizer, train_loaders, val_loaders, epochs=EPOCHS, devi
         model.train()
         loss_mse_list, loss_aux_list, loss_tot_list = [], [], []
 
+        # 로깅 누적
+        a_hat_acc, var_ratio_acc, snr_w_acc = 0.0, 0.0, 0.0
+        batch_count, clip_events = 0, 0
+
         # -------------------- Train --------------------
         for ld in t_loaders:
             for X, Y in ld:
@@ -219,54 +253,90 @@ def train_loop(model, optimizer, train_loaders, val_loaders, epochs=EPOCHS, devi
                 Y = Y.to(device).float()
                 optimizer.zero_grad(set_to_none=True)
 
+                # 창별 SNR 힌트(0~1) → 저 SNR일수록 weight 낮춤: w = (1-κ) + κ*h
+                h_win = torch.clamp(X[:, :, SNR_CH_IDX].mean(dim=1), 0.0, 1.0)  # [B]
+                h_eff = torch.pow(h_win, SNR_GAMMA)  # 비선형 옵션
+                w_snr = (1.0 - SNR_KAPPA) + SNR_KAPPA * h_eff  # [B]
+
                 if LOSS_MODE == 'phase':
                     # FFT 기반 손실은 fp16에서 불안정 → autocast 비활성 (fp32)
                     with torch.autocast(device_type=('cuda' if is_cuda else 'cpu'),
                                         dtype=torch.float16, enabled=False):
                         P = model(X).squeeze(-1)  # [B,T]
                         G = Y.squeeze(-1)
-                        loss_main = _si_mse(P, G)
-                        loss_aux  = PHASE_LAMBDA * phase_loss_spectral(
-                            P, G, fs=FS_MODEL, band=(0.08, 0.60)
-                        )
-                        loss = loss_main + loss_aux
-                        loss_aux_total = loss_aux
+
+                        # 메인/보조 (per-sample 벡터화)
+                        # 간단 근사: si-MSE ≈ z-MSE
+                        si_mse_vec = _mse_z_vec(P, G)
+                        phase_loss = phase_loss_spectral(P, G, fs=FS_MODEL, band=(0.08, 0.60))
+                        phase_vec = phase_loss * torch.ones_like(si_mse_vec)
+
+                        # 선택 보조항: env/var 추가(가벼운 정규화)
+                        env_vec = _env_l1_vec(P, G, FS_MODEL, ENV_WIN_S)
+                        var_vec, var_ratio = _var_penalty_vec(P, G, p=1)
+
+                        loss_vec = si_mse_vec \
+                                   + PHASE_LAMBDA * phase_vec \
+                                   + ENV_LAMBDA * env_vec \
+                                   + VAR_LAMBDA * var_vec
+
+                        loss = torch.mean(w_snr * loss_vec)
+                        loss_main = si_mse_vec.mean()
+                        loss_aux_total = (PHASE_LAMBDA * phase_vec
+                                          + ENV_LAMBDA * env_vec + VAR_LAMBDA * var_vec).mean()
+
+                        # 로깅용
+                        a_hat = torch.tensor(float('nan'), device=P.device)  # phase 모드에선 스케일 패널티 없음
+
                 else:  # 'corr'
                     with torch.autocast(device_type=('cuda' if is_cuda else 'cpu'),
                                         dtype=torch.float16, enabled=is_cuda):
                         P = model(X).squeeze(-1)  # [B,T]
                         G = Y.squeeze(-1)
 
-                        # (1) 기본: 파형 정합
-                        loss_main = _mse_z(P, G)
-
-                        # (2) 위상/지연 강건: soft-best-lag corr (미분가능)
+                        # (1) 파형 정합
+                        mse_vec = _mse_z_vec(P, G)  # [B]
+                        # (2) 위상/지연 강건
                         c_soft, _ = corr_soft_bestlag_torch(P, G, fs=FS_MODEL, lag_s=LAG_MAX_S, beta=PHASE_BETA)
-                        loss_corr = PHASE_LAMBDA * (1.0 - c_soft.mean())
+                        corr_vec = (1.0 - c_soft)  # [B]
+                        # (3) 스케일 보정
+                        scale_vec, a_hat = _scale_penalty_vec(P, G, p=1)  # [B], [B]
+                        # (4) 엔벨로프 정합
+                        env_vec = _env_l1_vec(P, G, FS_MODEL, ENV_WIN_S)  # [B]
+                        # (5) 분산 정합
+                        var_vec, var_ratio = _var_penalty_vec(P, G, p=1)  # [B], [B]
 
-                        # (3) 진폭 보정: 스케일 패널티 |a_hat - 1|
-                        loss_scale, a_hat = _scale_penalty(P, G, p=1)  # L1 권장
+                        # SNR 가중 결합
+                        loss_vec = mse_vec \
+                                   + PHASE_LAMBDA * corr_vec \
+                                   + SCALE_LAMBDA * scale_vec \
+                                   + ENV_LAMBDA * env_vec \
+                                   + VAR_LAMBDA * var_vec
 
-                        # (4) 에너지(엔벨로프) 매칭: RMS envelope L1
-                        env_win = max(3, int(ENV_WIN_S * FS_MODEL))
-                        envP = _rms_envelope(P, env_win)
-                        envG = _rms_envelope(G, env_win)
-                        loss_env = F.l1_loss(envP, envG)
+                        loss = torch.mean(w_snr * loss_vec)
+                        loss_main = mse_vec.mean()
+                        loss_aux_total = (PHASE_LAMBDA * corr_vec + SCALE_LAMBDA * scale_vec
+                                          + ENV_LAMBDA * env_vec + VAR_LAMBDA * var_vec).mean()
 
-                        # 최종 손실 결합
-                        loss_aux_total = loss_corr + SCALE_LAMBDA * loss_scale + ENV_LAMBDA * loss_env
-                        loss = loss_main + loss_aux_total
-
+                # === backward + AMP-safe grad clipping ===
                 scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)  # 스케일 해제 → 실제 grad
-                _ = torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP_NORM)
-
+                scaler.unscale_(optimizer)
+                total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP_NORM)
+                if torch.isfinite(total_norm) and float(total_norm) > GRAD_CLIP_NORM:
+                    clip_events += 1
                 scaler.step(optimizer)
                 scaler.update()
 
+                # 누적 로깅
                 loss_mse_list.append(float(loss_main.detach().cpu()))
-                loss_aux_list.append(float((loss_aux_total if LOSS_MODE != 'phase' else loss_aux).detach().cpu()))
+                loss_aux_list.append(float(loss_aux_total.detach().cpu()))
                 loss_tot_list.append(float(loss.detach().cpu()))
+                if torch.is_tensor(a_hat):
+                    a_hat_acc += float(torch.nanmean(a_hat).detach().cpu())
+                if torch.is_tensor(var_ratio):
+                    var_ratio_acc += float(torch.nanmean(var_ratio).detach().cpu())
+                snr_w_acc += float(w_snr.mean().detach().cpu())
+                batch_count += 1
 
         # -------------------- Validate --------------------
         with torch.no_grad():
@@ -275,16 +345,32 @@ def train_loop(model, optimizer, train_loaders, val_loaders, epochs=EPOCHS, devi
                 metrics = evaluate(model, vld, fs=FS_MODEL)  # dict 반환
                 vouts.append(metrics)
 
-        # 평균 지표 집계(키가 없을 수 있으니 안전하게 처리)
+        # 평균 지표 집계
         keys = set().union(*[m.keys() for m in vouts]) if len(vouts) else set()
-        val_avg = {k: float(np.nanmean([m[k] for m in vouts if k in m])) for k in keys}
 
+        val_avg = {}
+        for k in keys:
+            # dict(예: bpm_opts)는 평균에서 제외
+            vals = [m[k] for m in vouts if (k in m and not isinstance(m[k], dict))]
+            if len(vals):
+                val_avg[k] = float(np.nanmean(vals))
+
+        # 메타데이터는 그대로 한 개만 보존
+        for m in reversed(vouts):
+            if "bpm_opts" in m:
+                val_avg["bpm_opts"] = m["bpm_opts"]
+                break
+
+        clip_rate = (clip_events / max(1, batch_count)) * 100.0
         print(f"[epoch {ep:03d}] "
               f"train_main={np.mean(loss_mse_list):.6e} | "
               f"train_aux={np.mean(loss_aux_list):.6e} | "
               f"train_total={np.mean(loss_tot_list):.6e} | "
-              f"val_avg_corr_bestlag={val_avg.get('corr_bestlag', float('nan')):.6f} | "
-              f"val={{...}}")
+              f"a_hat_mean={a_hat_acc / max(1, batch_count):.3f} | "
+              f"var_ratio_mean={var_ratio_acc / max(1, batch_count):.3f} | "
+              f"snr_weight_mean={snr_w_acc / max(1, batch_count):.3f} | "
+              f"clip_rate={clip_rate:.1f}% | "
+              f"val_avg_corr_bestlag={val_avg.get('corr_bestlag', float('nan')):.6f}")
 
         # Early stop 기준: corr_bestlag
         key = val_avg.get('corr_bestlag', -1e9)

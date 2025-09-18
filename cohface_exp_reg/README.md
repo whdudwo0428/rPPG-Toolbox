@@ -1,6 +1,6 @@
 # COHFACE RR-only Regression — **V1.6 (Detailed)**
 
-20·40s 멀티윈도우, **미분가능 corr-loss**, **스케일/엔벨로프 보조항**, **AMP-호환 gradient clipping**, 테스트 지표/플롯 자동 저장
+20·40s 멀티윈도우, **미분가능 corr-loss**, **스케일/엔벨로프/분산(variance) 보조항**, **SNR-가중 학습**, **AMP-호환 gradient clipping**, 테스트 지표/플롯 자동 저장
 
 ---
 
@@ -9,14 +9,15 @@
 - **핵심 아이디어**: rPPG(광학) 대신 **상체 기하(어깨–코) 기반 움직임**으로 호흡수(RR) 파형을 회귀.  
 - **입력**: RR 전용 **16채널**(256 Hz) — **파형/에너지/결합/느린 컨텍스트** 4그룹으로 역할 분리 → **자세·시점·개인별 위상차**에 강건.  
 - **모델**: Bi-LSTM(2L, H=128) → RR 파형 시계열 출력.  
-- **손실**: `z-MSE` + `λ·(1 − corr@soft-best-lag)` + `α·|â−1|` + `γ·L1(envP,envG)`  
+- **손실**: `z-MSE` + `λ·(1 − corr@soft-best-lag)` + `α·|â−1|` + `γ·L1(envP,envG)` + `δ·|log(std(P)/std(G))|`  
   (상관항은 **Torch 미분가능 버전**, â는 예측↔GT 최소자승 스케일)  
+- **학습 가중**: 창별 `snr_rr_hint(h∈[0,1])`로 **SNR-가중 학습** 적용 → 저SNR 창 과벌점/평탄화 완화.  
 - **평가**: 스케일·부호 정렬 후 MSE/MAE, corr, corr@soft-best-lag, Welch-BPM(0.08–0.60 Hz, **prominence + argmax 폴백**)  
 - **윈도우**: 20 s + 40 s (stride = win×0.25 또는 `FIXED_STRIDE`)  
 - **옵션**: 세션 전역 **부호/라그 사전정렬**(`ENABLE_PREALIGN`, `±4 s`)  
 
 > **의도**:  
-> ① **파형 정합**(z-MSE) + ② **위상/지연 강건성**(soft-corr) + ③ **진폭/에너지 정합**(스케일·엔벨로프) + ④ **훈련 안정성**(grad clipping) →  
+> ① **파형 정합**(z-MSE) + ② **위상/지연 강건성**(soft-corr) + ③ **진폭/에너지/분산 정합**(스케일·엔벨로프·분산) + ④ **훈련 안정성**(SNR-가중, grad clipping) →  
 > **BPM 안정성은 유지**하면서 **파형 corr**과 **전이 내성**을 끌어올림.
 
 ---
@@ -24,26 +25,23 @@
 ## 1) V1.6 변경점 (vs V1.5)
 
 1. **corr-loss**를 **미분가능(Torch)** 으로 재구현 → 라그 탐색을 softmax 기대값으로 근사, **역전파 경로 보장**.  
-2. **스케일 패널티** `|â−1|` 및 **엔벨로프 L1(RMS)** 보조항 추가 → **진폭 과대/과소 추정**과 **저SNR 파형 평탄화** 보완.  
-3. **AMP-호환 Gradient Clipping**(L2 norm, 기본 1.0) → **LSTM 폭주** 방지.  
-4. `run_eval_best.py` 인자 정리: `--pin_memory` 추가, 중복 제거.  
-5. 문서/프리셋 정합: **val+test 동시 저장**, **Welch-BPM NaN 방지**(피크 미검출 시 **대역 argmax 폴백**).
+2. **스케일 패널티** `|â−1|` + **엔벨로프 L1(RMS)** + **분산(variance) 패널티** `|log(std(P)/std(G))|` 추가 → **진폭 과대/과소**·**저SNR 평탄화**·**전역 에너지 스케일** 보정.  
+3. **SNR-가중 학습**: 창별 `h`로 loss에 `(1−κ)+κ·h` 곱 → 저SNR 창 과벌점 완화.  
+4. **AMP-호환 Gradient Clipping**(L2, 기본 1.0) → **LSTM 폭주** 방지.  
+5. `run_eval_best.py` 인자 정리 및 문서/프리셋 정합: **val+test 동시 저장**, **Welch-BPM NaN 방지**(피크 미검출 시 **대역 argmax 폴백**, 서브-빈 보간/NFFT 업샘플 옵션 통일).
 
 ---
 
 ## 2) 파이프라인(개념)
 
-```
-
-Video → Mediapipe Pose → dW/dY/dD\_perp (axis\_v2 정규화)
+Video → Mediapipe Pose → dW/dY/dD_perp (axis_v2 정규화)
 → Resample 256 Hz → 16ch RR-only stack
 → Windows (20s,40s), stride=win×0.25
 → SeqRegressor(LSTM, bi/2L, H=128) → RR waveform (B,T,1)
-→ Loss: z-MSE + λ·(1 − corr\@soft-best-lag, ±2.0s, β=8)
-\+ α·|â−1| + γ·L1(envP,envG)
-→ Eval: (scale·sign) aligned MSE/MAE, corr, corr\@bestlag, Welch-BPM(+fallback)
+→ Loss: z-MSE + λ·(1 − corr@soft-best-lag, ±1.5 s, β=10.0)
++ α·|â−1| + γ·L1(envP,envG) + δ·|log(std(P)/std(G))|
+→ Eval: (scale·sign) aligned MSE/MAE, corr, corr@bestlag, Welch-BPM(+fallback)
 
-````
 
 **좌표계/기하 정의(요점)**  
 - **dW**: 좌·우 어깨 간 거리(가로 폭), **W0**=median(dW), **Wslow**=LPF(dW, `fc≈0.05–0.2Hz`)  
@@ -131,14 +129,13 @@ Video → Mediapipe Pose → dW/dY/dD\_perp (axis\_v2 정규화)
 ## 4) 손실 함수(설계 철학 → 구현)
 
 ### 4.1 메인: **z-MSE**  
-- 창 내부 표준화(z) 후 MSE → **파형 형태**에 집중 (**스케일/바이어스 제거**)  
-- 장점: 도메인 변이에 덜 민감. 단점: **진폭 정보** 반영이 약함 → 보조항으로 보완
+- 창 내부 표준화(z) 후 MSE → **파형 형태**에 집중(**스케일/바이어스 제거**)  
+- 장점: 도메인 변이에 덜 민감. 단점: **진폭 정보** 반영 약함 → 보조항으로 보완
 
 ### 4.2 보조1: **corr@soft-best-lag (미분가능)**  
-- 라그 범위(±`LAG_MAX_S`) 내 상관을 계산 → **softmax(β)** 로 기대값 취해 `E[corr]`을 얻음  
+- 라그 범위(±`LAG_MAX_S`) 내 상관을 계산 → **softmax(β)** 로 기대값 취해 `E[corr]` 산출  
 - 손실: `λ·(1 − E[corr])`  
-- **효과**: **위상/지연** 불일치에 **강건**. `corr_bestlag − corr` 격차 축소가 목표  
-- 구현: Torch 텐서 연산으로 **역전파 경로** 보장
+- **효과**: **위상/지연** 불일치에 **강건**. `corr_bestlag − corr` 격차 축소 목표
 
 ### 4.3 보조2: **스케일 패널티 |â−1|**  
 - `â = ⟨P,G⟩ / ⟨P,P⟩` (최소자승 폐형식)  
@@ -147,11 +144,20 @@ Video → Mediapipe Pose → dW/dY/dD\_perp (axis\_v2 정규화)
 
 ### 4.4 보조3: **엔벨로프 L1 (RMS)**  
 - `env(x) = sqrt(avgpool1d(x², k=ENV_WIN_S·fs))`  
-- 손실: `γ·L1(envP, envG)`  
+- 손실: `γ·L1(envP,envG)`  
 - **효과**: **저SNR 창**에서 파형 평탄화/진폭 드리프트 억제, **에너지 정합** 강화
 
-> **결합**: `Loss = z-MSE + λ·(1−softcorr) + α·|â−1| + γ·L1(env)`  
-> → BPM 안정성 유지 + corr↑ + 진폭 보정 + 저SNR 견고화
+### 4.5 보조4: **분산(variance) 패널티**  
+- 손실: `δ·|log(std(P)/std(G))|`  
+- **효과**: **전역 에너지 스케일 직접 정합** → `std(P)≈std(G)` 유도, 진폭 보정 가속
+
+### 4.6 (학습) **SNR-가중 손실**  
+- 창별 `h∈[0,1]`(snr_rr_hint 평균)에 대해 **`loss *= (1−κ)+κ·h`**, 기본 `κ=0.30`  
+- **효과**: **저SNR 창 과벌점 방지**·과도한 평탄화 완화
+
+> **결합**:  
+> `Loss = z-MSE + λ·(1−softcorr) + α·|â−1| + γ·L1(env) + δ·|log(std(P)/std(G))|`  
+> *(학습 시 위 식을 per-sample로 계산 후 SNR-가중하여 평균)*
 
 ---
 
@@ -159,9 +165,9 @@ Video → Mediapipe Pose → dW/dY/dD\_perp (axis\_v2 정규화)
 
 - **정렬**: 예측을 **스케일·부호 정렬** 후 지표 산출(align_scale)  
 - **지표**: **MSE/MAE**, **corr**, **corr@soft-best-lag**, **RR-BPM**  
-- **Welch-BPM**: 0.08–0.60 Hz 대역 PSD에서 prominence 기준 **피크 탐색**,  
-  미검출 시 **대역 argmax 폴백**, 옵션: **서브-빈 포물선 보간**, **NFFT 업샘플**  
-- 출력(A/B 테스트용): `metrics.json`(val+test), `metrics_test_full.json`(테스트 창별), **오버레이 4장 PNG**
+- **Welch-BPM**: 0.08–0.60 Hz 대역 PSD에서 prominence 기준 **피크 탐색**, 미검출 시 **대역 argmax 폴백**, 옵션: **서브-빈 포물선 보간**, **NFFT 업샘플**  
+- 출력: `metrics.json`(val+test), `metrics_test_full.json`(테스트 창별), **오버레이 4장 PNG**  
+- *훈련 종료 시 내부 평가도 동일한 Welch 옵션(BPM_FALLBACK_ARGMAX, BPM_SUBBIN_QUAD, BPM_NFFT_UP)을 사용하도록 코드에서 강제 통일되어 있습니다.*
 
 ---
 
@@ -179,6 +185,7 @@ Video → Mediapipe Pose → dW/dY/dD\_perp (axis\_v2 정규화)
 - **AMP-호환 Gradient Clipping**(L2):  
   `backward → scaler.unscale_(opt) → clip_grad_norm_ → step`  
   기본 `GRAD_CLIP_NORM=1.0` (clip 비율 >30% → 2.0, <1% → 0.8)  
+- **SNR-weighted Loss**: `w = (1−κ)+κ·h` (기본 `κ=0.30`, `h`는 snr_rr_hint 창 평균)  
 - 옵티마이저: AdamW, AMP(autocast+GradScaler)
 
 ---
@@ -188,22 +195,26 @@ Video → Mediapipe Pose → dW/dY/dD\_perp (axis\_v2 정규화)
 ### 8.1 요구사항 & 설치
 ```bash
 pip install torch scipy numpy opencv-python mediapipe matplotlib
-````
+```
 
-### 8.2 환경 변수(권장 프리셋)
+8.2 환경 변수(권장 프리셋)
 
 ```bash
 # 고정 의도
 export LOSS_MODE=corr
 export PHASE_LAMBDA=0.3
-export LAG_MAX_S=2.0
-export PHASE_BETA=8.0
+export LAG_MAX_S=1.5
+export PHASE_BETA=10.0
 
 # 보조항/클리핑 (신규)
-export SCALE_LAMBDA=0.05
-export ENV_LAMBDA=0.05
-export ENV_WIN_S=0.75
+export SCALE_LAMBDA=0.12         # 0.12~0.15 탐색
+export ENV_LAMBDA=0.06
+export ENV_WIN_S=0.50
 export GRAD_CLIP_NORM=1.0
+export VAR_LAMBDA=0.03    
+
+export SNR_CH_IDX=13             # snr_rr_hint
+export SNR_KAPPA=0.30
 
 # 윈도우/스트라이드
 export RR_WIN_LIST="20,40"
@@ -231,6 +242,8 @@ export MP_TASK_PATH="$PWD/cohface_exp_reg/assets/pose_landmarker_full.task"
 # BPM/컨텍스트
 export BPM_MIN_PROM=3.0
 export BPM_FALLBACK_ARGMAX=1
+export BPM_SUBBIN_QUAD=1
+export BPM_NFFT_UP=4
 export SNR_HIT_BPM=2
 export W_TREND_FC=0.05
 # (선택) 전역 사전정렬
@@ -238,8 +251,7 @@ export W_TREND_FC=0.05
 # export PREALIGN_MAX_LAG=4.0
 ```
 
-### 8.3 캐시 생성
-
+8.3 캐시 생성
 ```bash
 mkdir -p cohface_exp_reg/assets
 wget -O cohface_exp_reg/assets/pose_landmarker_full.task \
@@ -250,11 +262,9 @@ python -m cohface_exp_reg.run_extract_all \
   --subjects 1-40 --sessions 0-3 \
   --out cohface_exp_reg/cache_cohface_feats
 ```
+    생성: cache_cohface_feats/s<subject>_k<session>.npz(키: t,dW,dY,dD,dD_perp,resp)
 
-* 생성: `cache_cohface_feats/s<subject>_k<session>.npz`(키: `t,dW,dY,dD,dD_perp,resp`)
-
-### 8.4 학습(VAL+TEST 저장)
-
+8.4 학습(VAL+TEST 저장)
 ```bash
 python -m cohface_exp_reg.run_train_lstm \
   --cache cohface_exp_reg/cache_cohface_feats \
@@ -262,49 +272,55 @@ python -m cohface_exp_reg.run_train_lstm \
   --hidden 128 --layers 2 --bidir 1 --dropout 0.1 \
   --num_workers 12 --pin_memory 1
 ```
+    결과: runs/<tag>/{best_model.pt, metrics.json} (metrics에 val+test 동시 기록)
 
-* 결과: `runs/<tag>/{best_model.pt, metrics.json}` (metrics에 **val+test** 동시 기록)
-
-### 8.5 평가/플롯(체크포인트 재사용)
-
+8.5 평가/플롯(체크포인트 재사용)
 ```bash
+# (선택) 이미 8.2에서 설정했다면 아래 3줄은 생략 가능
 export BPM_FALLBACK_ARGMAX=1
 export BPM_SUBBIN_QUAD=1
 export BPM_NFFT_UP=4
 
 python -m cohface_exp_reg.run_eval_best \
   --cache cohface_exp_reg/cache_cohface_feats \
-  --model runs/<tag>/best_model.pt \
+  --model "cohface_exp_reg/runs/lstm_rronly_20250918_094730/best_model.pt" \
   --hidden 128 --layers 2 --bidir 1 --dropout 0.1 \
-  --num_workers 12 --pin_memory 1 --n_plots 4
+  --num_workers 12 --pin_memory 1 --n_plots 4 \
+  --vis_norm minmax01
 ```
-
-* 출력: `{run_dir}/metrics_test_full.json`, `{run_dir}/plots/test_sessionXX_[s**_k**.npz].png`
-
----
-
-## 9) 체크리스트(성공 판정)
-
-* **corr 상승** & **(corr\_bestlag − corr) 격차 축소** → **위상/지연 강건성** 개선
-* **scale\_a\_hat\_mean → 1.0 근접** → **진폭 보정** 정상 동작
-* **RR-BPM MAE 안정** + 누락 적음(폴백·보간·업샘플)
-* **클리핑 개입률** 정상(초반↑, 안정 후 1–30% 범위)
+    출력: {run_dir}/metrics_test_full.json, {run_dir}/plots/test_sessionXX_[s**_k**.npz].png
 
 ---
 
-## 10) 트러블슈팅
+9) 체크리스트(성공 판정)
+```
+    corr 상승 & (corr_bestlag − corr) 격차 축소 → 위상/지연 강건성 개선
 
-* **파형이 평탄**: `ENV_LAMBDA` ↑(0.05→0.1), `ENV_WIN_S` 0.5–1.0 s 조정
-* **진폭 과대/과소 지속**: `SCALE_LAMBDA` 0.05→0.1 단계적 ↑
-* **지연 흔들림**: `PHASE_BETA` ↑(8→10), `LAG_MAX_S` 재검토(1.5–2.5 s)
-* **학습 불안정/NaN**: `GRAD_CLIP_NORM` 2.0↑ 또는 LR↓, 클리핑 위치 확인
-* **BPM 누락**: `BPM_MIN_PROM` 2.0–2.5로 ↓, `BPM_NFFT_UP=4`, `BPM_SUBBIN_QUAD=1`
-* **도메인 전이 취약**: 학습/평가에서 **사전정렬 정책 일치**, subject-wise split 검토
+    scale_a_hat_mean → 1.0 근접 → 진폭 보정 정상 동작
 
+    RR-BPM MAE 안정 + 누락 적음(폴백·보간·업샘플)
+
+    클리핑 개입률 정상(초반↑, 안정 후 1–30% 범위)
+```
 ---
 
-## 11) 폴더 구조(요약)
+10) 트러블슈팅
+```
+    파형이 평탄: ENV_LAMBDA ↑(0.06→0.10), ENV_WIN_S 0.5–1.0 s 조정
 
+    진폭 과대/과소 지속: SCALE_LAMBDA 0.12→0.15 단계적 ↑, VAR_LAMBDA 0.03→0.05 AB
+
+    지연 흔들림: PHASE_BETA ↑(10→12), LAG_MAX_S 재검토(1.5–2.0 s)
+
+    학습 불안정/NaN: GRAD_CLIP_NORM 2.0↑ 또는 LR↓, 클리핑 위치 확인
+
+    BPM 누락: BPM_MIN_PROM 2.0–2.5로 ↓, BPM_NFFT_UP=4, BPM_SUBBIN_QUAD=1
+
+    도메인 전이 취약: 학습/평가에서 사전정렬 정책 일치, subject-wise split 검토
+```
+---
+
+11) 폴더 구조(요약)
 ```
 cohface_exp_reg/
   config.py
@@ -314,26 +330,26 @@ cohface_exp_reg/
   data.py         # 16ch 스택 & 윈도우
   models.py       # SeqRegressor(LSTM)
   sampler.py      # 20s/40s 버킷
-  train.py        # 손실/클리핑/평가
+  train.py        # 손실(SNR-가중 포함)/클리핑/평가(웰치 옵션 통일)
   run_extract_all.py
   run_train_lstm.py
   run_eval_best.py
   runs/, cache_cohface_feats/, assets/
 ```
-
 ---
 
-## 12) 라이선스
+12) 라이선스
 
-* COHFACE 데이터 정책 및 Mediapipe / PyTorch / SciPy 라이선스 준수
+    COHFACE 데이터 정책 및 Mediapipe / PyTorch / SciPy 라이선스 준수
+
 
 ---
-
-## 13) 빠른 프리셋(한 줄)
+13) 빠른 프리셋(한 줄)
 
 ```bash
-export LOSS_MODE=corr; export PHASE_LAMBDA=0.3; export LAG_MAX_S=2.0; export PHASE_BETA=8.0; \
-export SCALE_LAMBDA=0.05; export ENV_LAMBDA=0.05; export ENV_WIN_S=0.75; export GRAD_CLIP_NORM=1.0; \
-export RR_WIN_LIST="20,40"; export STRIDE_FRAC=0.25; \
-export BPM_MIN_PROM=3.0; export BPM_FALLBACK_ARGMAX=1; export SNR_HIT_BPM=2; export W_TREND_FC=0.05
+export LOSS_MODE=corr; export PHASE_LAMBDA=0.3; export LAG_MAX_S=1.5; export PHASE_BETA=10.0; \
+export SCALE_LAMBDA=0.12; export ENV_LAMBDA=0.06; export VAR_LAMBDA=0.03; export ENV_WIN_S=0.50; \
+export GRAD_CLIP_NORM=1.0; export RR_WIN_LIST="20,40"; export STRIDE_FRAC=0.25; \
+export BPM_MIN_PROM=3.0; export BPM_FALLBACK_ARGMAX=1; export BPM_SUBBIN_QUAD=1; export BPM_NFFT_UP=4; \
+export SNR_HIT_BPM=2; export W_TREND_FC=0.05; export SNR_CH_IDX=13; export SNR_KAPPA=0.30
 ```

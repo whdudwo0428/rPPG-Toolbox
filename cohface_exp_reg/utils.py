@@ -64,6 +64,17 @@ def zscore(x, eps=1e-6, clip_std: float = 8.0):
     return y.astype(np.float32)
 
 
+def _minmax01(x: np.ndarray, eps: float = 1e-8) -> np.ndarray:
+    x = np.asarray(x, dtype=np.float32)
+    lo, hi = np.min(x), np.max(x)
+    return (x - lo) / (max(hi - lo, eps))
+
+
+def _minmax11(x: np.ndarray, eps: float = 1e-8) -> np.ndarray:
+    y = _minmax01(x, eps)
+    return y * 2.0 - 1.0
+
+
 # ---------------- Filters (safe: use SOS when possible) ----------------
 
 def butter_bandpass(x, fs, lo, hi, order=4):

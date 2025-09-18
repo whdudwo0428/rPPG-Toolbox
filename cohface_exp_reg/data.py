@@ -133,8 +133,7 @@ class CohfaceSeqDataset(Dataset):
             env_high_y = rr_subband_env(y_n, FS_MODEL, lo=0.25, hi=0.60)
 
             # slow trend context (kept outside RR band)
-            from .utils import butter_lowpass as _lp
-            w_trend = zscore(_lp(w_rel, FS_MODEL, fc=0.2))
+            w_trend = zscore(butter_lowpass(w_rel, FS_MODEL, fc=W_TREND_FC))
 
             # session-level hints (scalar)
             def _snr(sig):
