@@ -1,4 +1,4 @@
-# COHFACE RR-only Regression — **V1.6 (Detailed)**
+# COHFACE RR-only Regression — **V2 (Detailed)**
 
 20·40s 멀티윈도우, **미분가능 corr-loss**, **스케일/엔벨로프/분산(variance) 보조항**, **SNR-가중 학습**, **AMP-호환 gradient clipping**, 테스트 지표/플롯 자동 저장
 
@@ -22,7 +22,7 @@
 
 ---
 
-## 1) V1.6 변경점 (vs V1.5)
+## 1) V2 변경점 (vs V1.5)
 
 1. **corr-loss**를 **미분가능(Torch)** 으로 재구현 → 라그 탐색을 softmax 기대값으로 근사, **역전파 경로 보장**.  
 2. **스케일 패널티** `|â−1|` + **엔벨로프 L1(RMS)** + **분산(variance) 패널티** `|log(std(P)/std(G))|` 추가 → **진폭 과대/과소**·**저SNR 평탄화**·**전역 에너지 스케일** 보정.  
@@ -119,7 +119,7 @@ Video → Mediapipe Pose → dW/dY/dD_perp (axis_v2 정규화)
 16) **corr_hint_wd** = z(|corr(BP_RR(w),BP_RR(n⊥))|, **상수**)  
 - **의도**: 동조/결합 **안정도 힌트**  
 - **효과**: 결합 강할수록 **신뢰↑**, 약하면 **오염 지표**  
-- **능력**: **동적 게이팅/주의 전환**의 근거(현재 V1.6에선 상수채널)
+- **능력**: **동적 게이팅/주의 전환**의 근거(현재 V2에선 상수채널)
 
 **스택 순서(고정)**  
 `[ w_rr, y_rr, d_rr, dw_rr, env_w, env_y, env_d, env_dw, cross_wy_rr, cross_wd_rr, env_low_y, env_high_y, w_trend, snr_rr_hint, corr_hint_wy, corr_hint_wd ]`
