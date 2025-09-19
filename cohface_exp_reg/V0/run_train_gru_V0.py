@@ -7,7 +7,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from cohface_exp_reg import config
-from cohface_exp_reg.data import load_all_entries, CohfaceSeqDataset, pad_collate
+from cohface_exp_reg.V2.data import load_all_entries, CohfaceSeqDataset, pad_collate
 from cohface_exp_reg.models import SeqRegressor
 from cohface_exp_reg.sampler import LengthBucketBatchSampler, parse_bucket_bs
 from cohface_exp_reg.train import train_loop, evaluate

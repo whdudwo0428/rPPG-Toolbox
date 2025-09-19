@@ -9,7 +9,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from cohface_exp_reg.config import (CACHE_DIR, RUNS_DIR, DEVICE, LR, EPOCHS, BUCKET_BS)
-from cohface_exp_reg.data import CohfaceSeqDataset
+from cohface_exp_reg.V2.data import CohfaceSeqDataset
 from cohface_exp_reg.models import SeqRegressor
 from cohface_exp_reg.train import make_batch, evaluate, train_loop, save_run
 
