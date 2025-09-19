@@ -254,7 +254,8 @@ python -m cohface_exp_reg.run_extract_all \
   --out cohface_exp_reg/cache_cohface_feats
 ```
 
-생성: `cache_cohface_feats/s<subject>_k<session>.npz` (키: `t,dW,dY,dD,dD_perp,resp`)
+- 생성: `cache_cohface_feats/s<subject>_k<session>.npz`
+- (키: `t,dW,dY,dD,dD_perp,resp`)
 
 ### 8.4 학습(VAL+TEST 저장)
 

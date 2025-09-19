@@ -8,8 +8,12 @@ import torch
 from torch.utils.data import Dataset
 
 from cohface_exp_reg.config import (
-    FS_MODEL, RR_WIN_LIST, STRIDE_FRAC, FIXED_STRIDE, W_TREND_FC,
-    ENABLE_PREALIGN, PREALIGN_MAX_LAG
+    FS_MODEL, RR_WIN_LIST,
+    STRIDE_FRAC, STRIDE_FRAC_LIST,
+    FIXED_STRIDE, FIXED_STRIDE_LIST,
+    W_TREND_FC,
+    ENABLE_PREALIGN, PREALIGN_MAX_LAG,
+    WINDOW_PAD_MODE, WINDOW_INCLUDE_TAIL
 )
 from cohface_exp_reg.utils import (
     zscore, rr_bandpass_z, env_rr, rr_subband_env,
@@ -42,7 +46,7 @@ def _snr_crest(x: np.ndarray, fs: float) -> float:
         return 0.0
     n = int(2 ** np.ceil(np.log2(max(64, x.size * 4))))
     p = np.abs(np.fft.rfft(x, n=n)) ** 2
-    lo = int(np.floor(0.08 / fs * n));
+    lo = int(np.floor(0.08 / fs * n))
     hi = int(np.ceil(0.60 / fs * n))
     band = p[max(1, lo): max(hi, lo + 2)]
     if band.size == 0 or not np.all(np.isfinite(band)):
@@ -61,12 +65,12 @@ def _snr_flatness(x: np.ndarray, fs: float) -> float:
         return 0.0
     n = int(2 ** np.ceil(np.log2(max(64, x.size * 4))))
     p = np.abs(np.fft.rfft(x, n=n)) ** 2 + 1e-12
-    lo = int(np.floor(0.08 / fs * n));
+    lo = int(np.floor(0.08 / fs * n))
     hi = int(np.ceil(0.60 / fs * n))
     band = p[max(1, lo): max(hi, lo + 2)]
     if band.size == 0:
         return 0.0
-    gm = np.exp(np.mean(np.log(band)));
+    gm = np.exp(np.mean(np.log(band)))
     am = float(np.mean(band))
     sfm = gm / am
     return float(np.clip(1.0 - sfm, 0.0, 1.0))
@@ -79,7 +83,7 @@ def _snr_topk(x: np.ndarray, fs: float) -> float:
         return 0.0
     n = int(2 ** np.ceil(np.log2(max(64, x.size * 4))))
     p = np.abs(np.fft.rfft(x, n=n)) ** 2
-    lo = int(np.floor(0.08 / fs * n));
+    lo = int(np.floor(0.08 / fs * n))
     hi = int(np.ceil(0.60 / fs * n))
     band = p[max(1, lo): max(hi, lo + 2)]
     if band.size < 4:
