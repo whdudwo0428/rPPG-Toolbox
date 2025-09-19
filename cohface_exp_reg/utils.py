@@ -1,11 +1,16 @@
 # -*- coding: utf-8 -*-
+import csv
+import json
 import os
+from collections import OrderedDict
+from pathlib import Path
 
 import numpy as np
 import torch
 from scipy.signal import butter, filtfilt, hilbert, welch, find_peaks, sosfiltfilt
 
 from .config import FS_MODEL, BPM_MIN_PROM
+from .config import RUNS_DIR
 
 
 # ---------------- Robust helpers ----------------
@@ -335,3 +340,90 @@ def align_scale_np(pred, gt, eps=1e-6):
     y = (a_hat * p).astype(np.float32)
     y = np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
     return y, float(a_hat)
+
+
+# ==== (신규) 결과 집계 유틸 =============
+def _ensure_dir(p: Path):
+    p.mkdir(parents=True, exist_ok=True)
+
+
+def _pivot_append(csv_path: Path, run_col: str, rows: dict):
+    """
+    'metric'을 행 index, run명을 열로 하는 wide CSV를 유지.
+    - 없으면 생성: header = ['metric', run_col]
+    - 있으면 읽어서 metric 행 union 후 run_col 열을 우측에 추가
+    """
+    table = OrderedDict()  # metric -> {run_name: value}
+    if csv_path.exists():
+        with open(csv_path, 'r', newline='') as f:
+            rdr = csv.reader(f)
+            try:
+                header = next(rdr)
+            except StopIteration:
+                header = ['metric']
+            run_cols = header[1:]
+            for r in rdr:
+                metric = r[0]
+                table[metric] = {c: v for c, v in zip(run_cols, r[1:])}
+
+    # 신규 열 주입
+    for k, v in rows.items():
+        table.setdefault(k, {})
+        table[k][run_col] = v
+
+    # header 재구성
+    all_metrics = list(table.keys())
+    all_runs = set()
+    for d in table.values(): all_runs.update(d.keys())
+    all_runs = sorted(all_runs)
+
+    with open(csv_path, 'w', newline='') as f:
+        w = csv.writer(f)
+        w.writerow(['metric'] + all_runs)
+        for m in all_metrics:
+            w.writerow([m] + [table[m].get(r, "") for r in all_runs])
+
+
+def append_exp_results(run_dir: str,
+                       run_name: str,
+                       metrics: dict,
+                       settings: dict,
+                       timings: dict,
+                       by_win: dict = None):
+    """
+    exp_results/{run_name}.json 저장 + exp_results/summary.csv (wide pivot) 누적 갱신
+    - rows(행)는 metric 이름, 열은 run_name
+    - by_win: 윈도우/스트라이드별 요약(dict), CSV에는 JSON 문자열로 1셀에 기록
+    """
+    exp_dir = Path(RUNS_DIR) / "exp_results"
+    _ensure_dir(exp_dir)
+
+    payload = {
+        "run_name": run_name,
+        "run_dir": run_dir,
+        "metrics": metrics,
+        "timings": timings,
+        "settings": settings,
+        "by_win": by_win or {},
+    }
+    with open(exp_dir / f"{run_name}.json", "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+    flat = OrderedDict()
+    # 핵심 지표
+    for k in ("val_corr", "val_corr_bestlag", "val_rr_bpm_mae",
+              "test_corr", "test_corr_bestlag", "test_rr_bpm_mae",
+              "val_mse", "val_mae", "test_mse", "test_mae"):
+        if k in metrics: flat[k] = metrics[k]
+    # 동작시간
+    for k in ("time_total_s", "time_data_s", "time_train_s", "time_eval_val_s", "time_eval_test_s"):
+        if k in timings: flat[k] = timings[k]
+    # 설정 요약
+    flat["wins_stride"] = settings.get("wins_stride", "")
+    flat["pad_mode"] = settings.get("pad_mode", "")
+    flat["include_tail"] = settings.get("include_tail", "")
+    # 윈도우별 성능/시간
+    if by_win:
+        flat["by_win_json"] = json.dumps(by_win, ensure_ascii=False)
+
+    _pivot_append(exp_dir / "summary.csv", run_name, flat)

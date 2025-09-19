@@ -314,6 +314,10 @@ class CohfaceSeqDataset(Dataset):
                 stride = max(1, int(round(T * STRIDE_FRAC)))
             pairs.append((T, stride))
 
+        # 집계 용도로 (T, stride) 보존 + 사람이 읽기 쉬운 표기
+        self.win_stride_pairs = list(pairs)  # [(T, stride_samples), ...]
+        self.win_stride_human = [f"{(T / FS_MODEL):.0f}s@{(stride / FS_MODEL):.2f}s" for (T, stride) in pairs]
+
         for sid, s in enumerate(self.sessions):
             L = len(s["Y"])
             for T, stride in pairs:
