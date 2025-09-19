@@ -13,12 +13,12 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from .config import DEVICE, FS_MODEL
-from .data import CohfaceSeqDataset
-from .models import SeqRegressor
-from .sampler import BucketBatchSampler
-from .train import evaluate
-from .utils import align_scale_np, _minmax01, _minmax11
+from cohface_exp_reg.config import DEVICE, FS_MODEL
+from cohface_exp_reg.V2.data import CohfaceSeqDataset
+from cohface_exp_reg.models import SeqRegressor
+from cohface_exp_reg.sampler import BucketBatchSampler
+from cohface_exp_reg.train import evaluate
+from cohface_exp_reg.utils import align_scale_np, _minmax01, _minmax11
 
 
 def parse_bucket_bs(s: str):
@@ -104,7 +104,7 @@ def main():
     ap.add_argument("--layers", type=int, default=2)
     ap.add_argument("--bidir", type=int, default=1)
     ap.add_argument("--dropout", type=float, default=0.1)
-    ap.add_argument("--bucket_bs", type=str, default="10240:4,5120:8")
+    ap.add_argument("--bucket_bs", type=str, default="2560:12,3840:10,5120:8,7680:5,10240:4")
     ap.add_argument("--num_workers", type=int, default=12)
     ap.add_argument("--pin_memory", type=int, default=1)
     ap.add_argument("--n_plots", type=int, default=4)

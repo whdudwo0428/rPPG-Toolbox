@@ -6,11 +6,11 @@ from datetime import datetime
 import torch
 from torch.utils.data import DataLoader
 
-from .config import RUNS_DIR, DEVICE, LR
-from .data import CohfaceSeqDataset
-from .models import SeqRegressor
-from .sampler import BucketBatchSampler
-from .train import train_loop, evaluate, save_run
+from cohface_exp_reg.config import RUNS_DIR, DEVICE, LR
+from cohface_exp_reg.V2.data import CohfaceSeqDataset
+from cohface_exp_reg.models import SeqRegressor
+from cohface_exp_reg.sampler import BucketBatchSampler
+from cohface_exp_reg.train import train_loop, evaluate, save_run
 
 
 def parse_bucket_bs(s: str):
@@ -30,7 +30,7 @@ def main():
     ap.add_argument('--layers', type=int, default=2)
     ap.add_argument('--bidir', type=int, default=1)
     ap.add_argument('--dropout', type=float, default=0.1)
-    ap.add_argument('--bucket_bs', type=str, default='10240:4,5120:8')
+    ap.add_argument('--bucket_bs', type=str, default='2560:12,3840:10,5120:8,7680:5,10240:4')
     ap.add_argument('--num_workers', type=int, default=8)
     ap.add_argument('--pin_memory', type=int, default=1)
     args = ap.parse_args()

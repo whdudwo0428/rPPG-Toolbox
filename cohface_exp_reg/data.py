@@ -7,11 +7,11 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from .config import (
+from cohface_exp_reg.config import (
     FS_MODEL, RR_WIN_LIST, STRIDE_FRAC, FIXED_STRIDE, W_TREND_FC,
     ENABLE_PREALIGN, PREALIGN_MAX_LAG
 )
-from .utils import (
+from cohface_exp_reg.utils import (
     zscore, rr_bandpass_z, env_rr, rr_subband_env,
     butter_lowpass, global_sign_and_lag,
     robust_clip, _finite_fill
@@ -291,41 +291,102 @@ class CohfaceSeqDataset(Dataset):
 
             self.sessions.append({"X": X16, "Y": Y})
 
-        # build window indices
-        self.idxs = []  # list of (sess_id, start, length)
-        strides = []
-        for win_s in RR_WIN_LIST:
+        # build window indices (flexible stride + optional tail padding)
+        self.idxs = []  # list of (sess_id, start, T)
+
+        # 윈도우별 stride 결정: (T, stride_samples)
+        pairs = []
+        for i, win_s in enumerate(RR_WIN_LIST):
             T = int(round(win_s * FS_MODEL))
-            if FIXED_STRIDE is None:
-                stride = int(round(T * STRIDE_FRAC))
-            else:
+            if FIXED_STRIDE_LIST:
+                stride = int(
+                    round((FIXED_STRIDE_LIST[i] if i < len(FIXED_STRIDE_LIST) else FIXED_STRIDE_LIST[-1]) * FS_MODEL))
+            elif FIXED_STRIDE is not None:
                 stride = int(round(FIXED_STRIDE * FS_MODEL))
-            strides.append((T, stride))
+            elif STRIDE_FRAC_LIST:
+                frac = STRIDE_FRAC_LIST[i] if i < len(STRIDE_FRAC_LIST) else STRIDE_FRAC_LIST[-1]
+                stride = max(1, int(round(T * float(frac))))
+            else:
+                stride = max(1, int(round(T * STRIDE_FRAC)))
+            pairs.append((T, stride))
+
         for sid, s in enumerate(self.sessions):
             L = len(s["Y"])
-            for T, stride in strides:
-                if L < T:
+            for T, stride in pairs:
+                if L <= 0:
                     continue
-                for st in range(0, L - T + 1, stride):
+                if L < T and WINDOW_PAD_MODE == "none" and not WINDOW_INCLUDE_TAIL:
+                    continue
+                if WINDOW_INCLUDE_TAIL:
+                    # 끝까지 커버하도록 ceil
+                    n = max(1, int(np.ceil(max(L - T, 0) / float(stride))) + 1)
+                    last_st = max(0, (n - 1) * stride)
+                else:
+                    if L < T:
+                        continue
+                    last_st = L - T
+                st = 0
+                while st <= last_st:
                     self.idxs.append((sid, st, T))
+                    st += stride
 
     def __len__(self):
         return len(self.idxs)
 
     def __getitem__(self, i: int):
         sid, st, T = self.idxs[i]
+        sess = self.sessions[sid]
+        Xfull = sess["X"]
+        Yfull = sess["Y"]
+        L = len(Yfull)
 
-        # 윈도우 복사(세션 캐시 오염 방지)
-        X = self.sessions[sid]["X"][st:st + T].copy()  # [T,16]
-        Y = self.sessions[sid]["Y"][st:st + T]  # [T]
+        ed = st + T
+        if ed <= L:
+            X = Xfull[st:ed].copy()
+            Y = Yfull[st:ed]
+        else:
+            # tail padding
+            pad_len = ed - L
+            Xseg = Xfull[st:].copy() if st < L else np.zeros((0, Xfull.shape[-1]), np.float32)
+            Yseg = Yfull[st:] if st < L else np.zeros((0,), np.float32)
 
-        # 채널 규약: 0=w_rr, 1=y_rr, 2=d_rr, 13=snr_rr_hint, 14=corr_hint_wy, 15=corr_hint_wd
+            if WINDOW_PAD_MODE == "zero" or WINDOW_PAD_MODE == "none":
+                xpad = np.zeros((pad_len, Xfull.shape[-1]), np.float32)
+                ypad = np.zeros((pad_len,), np.float32)
+            elif WINDOW_PAD_MODE == "edge":
+                last_x = Xfull[L - 1:L].repeat(pad_len, axis=0) if L > 0 else np.zeros((pad_len, Xfull.shape[-1]),
+                                                                                       np.float32)
+                last_y = np.full((pad_len,), float(Yfull[L - 1]) if L > 0 else 0.0, np.float32)
+                xpad, ypad = last_x, last_y
+            elif WINDOW_PAD_MODE == "reflect":
+                # 충분히 길지 않으면 edge로 대체
+                if L - st >= 2:
+                    refl = Xfull[max(0, L - pad_len - 1):L - 1][::-1]
+                    xpad = np.concatenate([refl, np.zeros((max(0, pad_len - len(refl)), Xfull.shape[-1]), np.float32)],
+                                          axis=0)[:pad_len]
+                    refly = Yfull[max(0, L - pad_len - 1):L - 1][::-1]
+                    ypad = np.concatenate([refly, np.zeros((max(0, pad_len - len(refly)),), np.float32)], axis=0)[
+                        :pad_len]
+                else:
+                    last_x = Xfull[L - 1:L].repeat(pad_len, axis=0) if L > 0 else np.zeros((pad_len, Xfull.shape[-1]),
+                                                                                           np.float32)
+                    last_y = np.full((pad_len,), float(Yfull[L - 1]) if L > 0 else 0.0, np.float32)
+                    xpad, ypad = last_x, last_y
+            else:
+                xpad = np.zeros((pad_len, Xfull.shape[-1]), np.float32)
+                ypad = np.zeros((pad_len,), np.float32)
+
+            X = np.concatenate([Xseg, xpad], axis=0)
+            Y = np.concatenate([Yseg, ypad], axis=0)
+
+        # SNR 힌트 채널 갱신
         try:
             snr_win = _snr_hint_window(X, FS_MODEL)
         except Exception:
             snr_win = 0.0
         X[:, 13] = np.float32(snr_win)
 
+        # corr 힌트
         if T > 8 and np.all(np.isfinite(X[:, 0])) and np.all(np.isfinite(X[:, 1])) and np.all(np.isfinite(X[:, 2])):
             cw = float(abs(np.corrcoef(X[:, 0], X[:, 1])[0, 1]))
             cd = float(abs(np.corrcoef(X[:, 0], X[:, 2])[0, 1]))

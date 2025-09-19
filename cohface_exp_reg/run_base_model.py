@@ -14,7 +14,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from .config import CACHE_DIR, RUNS_DIR, DEVICE, LR
-from .data import CohfaceSeqDataset
+from cohface_exp_reg.V2.data import CohfaceSeqDataset
 from .models import SeqRegressor
 from .sampler import BucketBatchSampler
 from .train import train_loop, evaluate, save_run
